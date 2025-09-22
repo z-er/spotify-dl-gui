@@ -62,6 +62,15 @@ class MainWindow(QWidget):
         self._really_quit = False  # set True when user picks Quit explicitly
 
         # ---- Header ----
+        icon_source = app_icon or get_app_icon()
+        self.header_icon = QLabel()
+        self.header_icon.setFixedSize(32, 32)
+        self.header_icon.setScaledContents(True)
+        if icon_source and not icon_source.isNull():
+            self.header_icon.setPixmap(icon_source.pixmap(32, 32))
+            self.header_icon.setToolTip(f'{APP_NAME} {APP_VER}')
+        else:
+            self.header_icon.setVisible(False)
         title = QLabel(f"spotify-dl — simple GUI  •  {APP_VER}")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         self.btn_history = QPushButton("History"); self.btn_history.clicked.connect(self.open_history)
@@ -71,6 +80,9 @@ class MainWindow(QWidget):
         self.btn_quit.clicked.connect(self._quit)
 
         hdr = QHBoxLayout()
+        if self.header_icon.isVisible():
+            hdr.addWidget(self.header_icon)
+            hdr.addSpacing(6)
         hdr.addWidget(title)
         hdr.addStretch()
         hdr.addWidget(self.btn_history)
