@@ -3,7 +3,7 @@
 A modern, dark-themed desktop GUI wrapper for [spotify-dl](https://github.com/GuillemCastro/spotify-dl), built with Python + PySide6.
 Easily download your Spotify playlists, albums, and tracks with one click, organize your library automatically, and run in the background with Sentry mode.
 
-Current version: v0.7
+Current version: v0.8
 
 ---
 
@@ -14,16 +14,16 @@ Current version: v0.7
   - Reorder, remove, or clear queue items.
   - Import/Export queue to `.json` or `.txt`.
   - Drag-drop Spotify links directly into the app.
-  - New in v0.7: Queue persistence (auto-save/restore on restart).
-  - New in v0.7: Retry failed and Remove completed actions.
+  - Since v0.7: Queue persistence (auto-save/restore on restart).
+  - Since v0.7: Retry failed and Remove completed actions.
 
 - Download Control
   - Choose format: `flac`, `mp3`, `m4a`, `opus`.
   - Parallel downloads with adaptive rate limiting.
   - Pause/Resume queue, or stop after current job.
   - Logs with raw terminal output and per-job summaries.
-  - New in v0.7: Windows taskbar progress + tray tooltip with elapsed/ETA.
-  - New in v0.7: Shows installed `spotify-dl` version next to the binary pill.
+  - Since v0.7: Windows taskbar progress + tray tooltip with elapsed/ETA.
+  - Since v0.7: Shows installed `spotify-dl` version next to the binary pill.
 
 - Background Modes
   - Minimize to tray with notifications.
@@ -41,16 +41,16 @@ Current version: v0.7
   - Keeps history of downloaded jobs.
   - Log file paths, sizes, suspect files.
   - JSON summaries for automation.
-  - New in v0.7: History capacity setting (in Settings).
-  - New in v0.7: Export visible history and Clear history actions.
+  - Since v0.7: History capacity setting (in Settings).
+  - Since v0.7: Export visible history and Clear history actions.
 
 - UI Goodies
   - Dark theme with orange highlights.
   - Persistent terminal (Windows) option.
   - Tray menu with Sentry toggle + Quit.
   - Clipboard auto-add toggle.
-  - New in v0.7: Global keyboard shortcuts (press F1 for a full list).
-  - New in v0.7: “Open in Spotify” from queue/history.
+  - Since v0.7: Global keyboard shortcuts (press F1 for a full list).
+  - Since v0.7: "Open in Spotify" from queue/history.
 
 ---
 
@@ -76,15 +76,15 @@ You are responsible for how you use this software.
 ---
 
 
-## What’s New in v0.7
+## What’s New in v0.8
 
-- Queue now persists across restarts.
-- Retry failed and Remove completed queue actions.
+- Forward spotify-dl JSON events for realtime progress, retry, and rate-limit feedback.
+- Queue persistence, Retry failed, and Remove completed actions.
 - Keyboard shortcuts with a Shortcuts dialog (press F1).
-- Binary pill shows the installed `spotify-dl` version.
+- Binary pill now shows the installed `spotify-dl` version.
 - Configurable History capacity; export visible entries and clear history.
-- Windows: taskbar progress and tray tooltip with elapsed/ETA.
-- “Open in Spotify” from queue context menu and History.
+- Windows: taskbar progress, tray tooltip with elapsed/ETA, and auto pacing in Sentry mode.
+- "Open in Spotify" from queue context menu and History.
 
 ---
 

@@ -1,6 +1,6 @@
 # spotifydl_gui/runner.py
 """
-Queue runner for spotify-dl GUI (v0.7).
+Queue runner for spotify-dl GUI (v0.8).
 
 Responsibilities
 - Spawn spotify-dl via QProcess per-URL, stream merged stdout/stderr
@@ -69,6 +69,7 @@ class RunOptions:
     bin_override: str = ""       # optional; otherwise resolve
     sentry_enabled: bool = False
     sentry_gap_sec: int = 25
+    json_events: bool = True
     failure_delay_ms: int = 2000
     failure_delay_multiplier: float = 2.0
     failure_delay_max_ms: int = 60000
@@ -84,6 +85,8 @@ class RunOptions:
             args += ["--force"]
         if self.extra.strip():
             args += shlex.split(self.extra)
+        if self.json_events:
+            args += ["--json-events"]
         args += [
             "--failure-delay-ms", str(int(self.failure_delay_ms)),
             "--failure-delay-multiplier", str(float(self.failure_delay_multiplier)),
@@ -127,6 +130,7 @@ class Runner(QObject):
     sig_backoff_updated = Signal(int)                    # remaining seconds (0 = clear)
     sig_command_line = Signal(int, str)                  # index, command string (for persistent terminal mirroring)
     sig_parallel_changed = Signal(int)                   # current effective parallel (adaptive)
+    sig_rate_limit_notice = Signal(str)                  # textual notice for rate limiting
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -166,6 +170,8 @@ class Runner(QObject):
         self._smart_sync: bool = True
         self._sentry_enabled: bool = False
         self._sentry_gap_sec: int = 25
+        self._json_events: bool = False
+        self._json_buffer: str = ''
         self._failure_delay_ms: int = 2000
         self._failure_delay_multiplier: float = 2.0
         self._failure_delay_max_ms: int = 60000
@@ -199,6 +205,8 @@ class Runner(QObject):
             self._sentry_gap_sec = int(opts.sentry_gap_sec)
         except Exception:
             self._sentry_gap_sec = 25
+        self._json_events = bool(getattr(opts, "json_events", False))
+        self._json_buffer = ""
         try:
             self._failure_delay_ms = int(opts.failure_delay_ms)
         except Exception:
@@ -267,6 +275,8 @@ class Runner(QObject):
             args += ["--force"]
         if opts.extra.strip():
             args += shlex.split(opts.extra)
+        if opts.json_events:
+            args += ["--json-events"]
         args += [
             "--failure-delay-ms", str(int(opts.failure_delay_ms)),
             "--failure-delay-multiplier", str(float(opts.failure_delay_multiplier)),
@@ -319,6 +329,7 @@ class Runner(QObject):
             opts.failure_delay_ms = self._failure_delay_ms
             opts.failure_delay_multiplier = self._failure_delay_multiplier
             opts.failure_delay_max_ms = self._failure_delay_max_ms
+            opts.json_events = self._json_events
 
 
         url = self._urls[self._idx]
@@ -368,17 +379,19 @@ class Runner(QObject):
         if not data:
             return
         text = data.decode("utf-8", "ignore")
-        # Stream to UI
-        self.sig_job_log.emit(self._idx, text.replace("\r", "\n"))
-        self._raw_collector.append(text.lower())
-        # Parse % progress for row
-        for m in PERCENT_RE.finditer(text):
-            try:
-                pct = int(m.group(1))
-                if 0 <= pct <= 100:
-                    self.sig_job_progress.emit(self._idx, pct)
-            except Exception:
-                pass
+        cleaned = text.replace("", "")
+        self._raw_collector.append(cleaned.lower())
+        if self._json_events:
+            cleaned = self._process_json_events(cleaned)
+        if cleaned:
+            self.sig_job_log.emit(self._idx, cleaned)
+            for m in PERCENT_RE.finditer(cleaned):
+                try:
+                    pct = int(m.group(1))
+                    if 0 <= pct <= 100:
+                        self.sig_job_progress.emit(self._idx, pct)
+                except Exception:
+                    pass
 
     def _saw_rate_limit(self) -> bool:
         if not self._raw_collector:
@@ -386,6 +399,99 @@ class Runner(QObject):
         txt = "".join(self._raw_collector)
         return any(tok in txt for tok in RATE_LIMIT_TOKENS)
 
+    def _process_json_events(self, text: str) -> str:
+        buffer = self._json_buffer + text
+        ends_with_newline = buffer.endswith("\n")
+        parts = buffer.split("\n")
+        if ends_with_newline:
+            self._json_buffer = ""
+        else:
+            self._json_buffer = parts.pop() if parts else buffer
+
+        visible: list[str] = []
+        for raw_line in parts:
+            stripped = raw_line.strip()
+            handled = False
+            if stripped.startswith("{"):
+                try:
+                    evt = json.loads(stripped)
+                except Exception:
+                    evt = None
+                if isinstance(evt, dict):
+                    self._handle_json_event(evt)
+                    handled = True
+            if not handled:
+                if "[rate-limit" in raw_line.lower():
+                    self.sig_rate_limit_notice.emit(raw_line.strip())
+                visible.append(raw_line)
+
+        if not visible:
+            return ""
+
+        output = "\n".join(visible)
+        if ends_with_newline:
+            output += "\n"
+        return output
+
+    def _handle_json_event(self, evt: dict) -> None:
+        event = evt.get("event") or evt.get("type")
+        if not event:
+            return
+        event = str(event).lower()
+
+        if event in {"stage", "stage_update"}:
+            progress = evt.get("progress")
+            try:
+                pct = int(float(progress))
+            except Exception:
+                pct = None
+            if pct is not None and 0 <= pct <= 100 and 0 <= self._idx < len(self._urls):
+                self.sig_job_progress.emit(self._idx, pct)
+            return
+
+        if event == "track_start":
+            if 0 <= self._idx < len(self._urls):
+                self.sig_job_progress.emit(self._idx, 0)
+            self.sig_rate_limit_notice.emit("")
+            return
+
+        if event == "track_complete":
+            if 0 <= self._idx < len(self._urls):
+                self.sig_job_progress.emit(self._idx, 100)
+            return
+
+        if event in {"track_failed", "track_skipped"}:
+            if 0 <= self._idx < len(self._urls):
+                self.sig_job_progress.emit(self._idx, 0)
+            return
+
+        if event == "rate_limit_wait":
+            wait_ms = evt.get("wait_ms") or evt.get("delay_ms") or evt.get("wait") or 0
+            try:
+                wait_ms = int(float(wait_ms))
+            except Exception:
+                wait_ms = 0
+            if wait_ms > 0:
+                seconds = max(1, (wait_ms + 999) // 1000)
+                self.sig_rate_limit_notice.emit(
+                    f"Waiting {seconds}s before next track (rate limit)"
+                )
+            return
+
+        if event == "rate_limit_backoff":
+            delay_ms = evt.get("delay_ms") or evt.get("wait_ms") or evt.get("delay") or 0
+            try:
+                delay_ms = int(float(delay_ms))
+            except Exception:
+                delay_ms = 0
+            reason = evt.get("reason") or ""
+            if delay_ms > 0:
+                seconds = max(1, (delay_ms + 999) // 1000)
+                msg = f"Cooling down {seconds}s to avoid rate limits"
+                if reason:
+                    msg += f" ({reason})"
+                self.sig_rate_limit_notice.emit(msg)
+                self.sig_backoff_updated.emit(seconds)
     def _cleanup_after_job(self):
         if self._proc:
             try:
@@ -395,6 +501,7 @@ class Runner(QObject):
         self._proc = None
         self._tail_timer.stop()
         self._tail_pos = 0
+        self._json_buffer = ""
         # remove temp file reading responsibility; actual file cleanup happens after we read content
 
     def _write_log(self, dest_dir: str, url: str, start_iso: str,

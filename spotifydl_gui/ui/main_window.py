@@ -1,6 +1,6 @@
 # spotifydl_gui/ui/main_window.py
 """
-MainWindow — wires UI + Runner + Settings + History for spotify-dl GUI v0.7
+MainWindow — wires UI + Runner + Settings + History for spotify-dl GUI v0.8
 
 Features:
 - Queue panel with per-row progress bars (QueueRow)
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Qt, QTimer, QTime, QUrl
-from PySide6.QtGui import QAction, QIcon, QDesktopServices
+from PySide6.QtGui import QAction, QIcon, QDesktopServices, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox,
     QSpinBox, QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QMenu, QSystemTrayIcon,
@@ -254,6 +254,7 @@ class MainWindow(QWidget):
         self.runner.sig_backoff_updated.connect(self._on_backoff_updated)
         self.runner.sig_command_line.connect(self._on_command_line)
         self.runner.sig_parallel_changed.connect(self._on_parallel_changed)
+        self.runner.sig_rate_limit_notice.connect(self._on_rate_limit_notice)
 
         # ---- Clipboard watcher ----
         self._last_clip = ""
@@ -676,7 +677,9 @@ class MainWindow(QWidget):
         self.backoff_label.clear()
 
     def _on_job_log(self, idx: int, chunk: str):
-        self.tail.moveCursor(self.tail.textCursor().End)
+        tc = self.tail.textCursor()
+tc.movePosition(QTextCursor.End)
+self.tail.setTextCursor(tc)
         self.tail.insertPlainText(chunk)
         lower = chunk.lower()
         if "[rate-limit" in lower:
@@ -740,6 +743,13 @@ class MainWindow(QWidget):
     def _on_backoff_updated(self, remaining: int):
         if remaining > 0:
             self.backoff_label.setText(f"Cooling down {remaining}s to avoid rate limits…")
+        else:
+            self.backoff_label.clear()
+
+    def _on_rate_limit_notice(self, message: str):
+        msg = (message or "").strip()
+        if msg:
+            self.backoff_label.setText(msg)
         else:
             self.backoff_label.clear()
 

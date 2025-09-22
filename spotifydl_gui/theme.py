@@ -76,7 +76,7 @@ def apply_dark_theme(app: QApplication) -> None:
         }}
         QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
             border-color: {accent.name()};
-            box-shadow: 0 0 0 2px {accent.name()}33;
+            outline: 2px solid {accent.name()};
         }}
         QTextEdit {{ padding: 8px; }}
 
