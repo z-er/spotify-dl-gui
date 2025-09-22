@@ -14,6 +14,25 @@ Current version: **v0.8** as of 22/09/2025
 
 ---
 
+## Getting Started
+
+### Prerequisites
+- Python 3.10+ (tested with 3.11)
+- [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or [use provided binary](https://github.com/z-er/spotify-dl))
+- Spotify Premium account (required by spotify-dl)
+
+### Install
+> [!INFORMATION]
+> Grab the latest release [here!](https://github.com/z-er/spotify-dl-gui/releases)
+
+## Disclaimer
+
+This tool is a community-built GUI for [spotify-dl](https://github.com/GuillemCastro/spotify-dl).
+Use responsibly — downloading Spotify content may violate Spotify's Terms of Service and/or local copyright laws.
+You are responsible for how you use this software.
+
+---
+
 ## Features
 
 - Queue Management
@@ -66,22 +85,6 @@ Current version: **v0.8** as of 22/09/2025
 TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 
 ---
-
-## Getting Started
-
-### Prerequisites
-- Python 3.10+ (tested with 3.11)
-- [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or [use provided binary](https://github.com/z-er/spotify-dl))
-- Spotify Premium account (required by spotify-dl)
-
-## Disclaimer
-
-This tool is a community-built GUI for [spotify-dl](https://github.com/GuillemCastro/spotify-dl).
-Use responsibly — downloading Spotify content may violate Spotify's Terms of Service and/or local copyright laws.
-You are responsible for how you use this software.
-
----
-
 
 ## What’s New in v0.8
 
