@@ -220,7 +220,7 @@ class MainWindow(QWidget):
             # Sentry toggle in tray
             self._sentry_enabled = self._read_bool(KEYS.get("sentry_enabled", "sentry_enabled"), False)
             try:
-                self._sentry_gap_sec = int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25))
+                self._sentry_gap_sec = max(25, int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25)))
             except Exception:
                 self._sentry_gap_sec = 25
             act_sentry = QAction("Sentry mode", self); act_sentry.setCheckable(True)
@@ -240,7 +240,7 @@ class MainWindow(QWidget):
             # Fallback Sentry defaults without tray
             self._sentry_enabled = self._read_bool(KEYS.get("sentry_enabled", "sentry_enabled"), False)
             try:
-                self._sentry_gap_sec = int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25))
+                self._sentry_gap_sec = max(25, int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25)))
             except Exception:
                 self._sentry_gap_sec = 25
 
@@ -366,11 +366,12 @@ class MainWindow(QWidget):
             return None
 
     def _update_sentry_indicator(self):
-        if getattr(self, "_sentry_enabled", False):
-            self._sentry_label.setText(f"🛰️ Sentry: ON  •  gap {max(5, int(getattr(self, '_sentry_gap_sec', 25)))}s")
+        if getattr(self, '_sentry_enabled', False):
+            gap = max(25, int(getattr(self, '_sentry_gap_sec', 25)))
+            self._sentry_label.setText(f'Sentry: ON  -  gap {gap}s')
         else:
-            self._sentry_label.setText("🛰️ Sentry: OFF")
-    
+            self._sentry_label.setText('Sentry: OFF')
+
     def _quit(self):
         # If a run is in progress, confirm stopping
         if self.runner.is_running():
@@ -624,6 +625,7 @@ class MainWindow(QWidget):
     def _stop(self):
         self.runner.stop()
         self._set_running(False)
+        self.backoff_label.clear()
         # reset running statuses
         for i in range(self.queue.count()):
             row = self._row(i)
@@ -632,6 +634,7 @@ class MainWindow(QWidget):
         self.tail.setVisible(False)
         self._save_queue_state()
         self._taskbar_reset()
+        self.backoff_label.clear()
         if self.tray:
             self.tray.setToolTip("Idle")
 
@@ -726,6 +729,7 @@ class MainWindow(QWidget):
                      f"OK: {totals.ok}  •  Fail: {totals.fail}  •  Suspects: {totals.suspect}",
                      7000)
         self._taskbar_reset()
+        self.backoff_label.clear()
         if self.tray:
             self.tray.setToolTip("Idle")
         if totals.ok > 0 and self._read_bool(KEYS["open_when_done"], False):
@@ -879,7 +883,7 @@ class MainWindow(QWidget):
             # Re-read Sentry config from settings
             self._sentry_enabled = self._read_bool(KEYS.get("sentry_enabled", "sentry_enabled"), False)
             try:
-                self._sentry_gap_sec = int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25))
+                self._sentry_gap_sec = max(25, int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25)))
             except Exception:
                 self._sentry_gap_sec = 25
             self._update_sentry_indicator()
@@ -930,7 +934,7 @@ class MainWindow(QWidget):
                     bin_override=self.s.value(KEYS["bin"], "").strip(),
                     # Sentry
                     sentry_enabled=True,
-                    sentry_gap_sec=max(5, int(self._sentry_gap_sec)),
+                    sentry_gap_sec=max(25, int(self._sentry_gap_sec)),
                     failure_delay_ms=self._read_int(KEYS.get("failure_delay_ms", "failure_delay_ms"), 2000),
                     failure_delay_multiplier=self._read_float(KEYS.get("failure_delay_multiplier", "failure_delay_multiplier"), 2.0),
                     failure_delay_max_ms=self._read_int(KEYS.get("failure_delay_max_ms", "failure_delay_max_ms"), 60000),
@@ -938,6 +942,15 @@ class MainWindow(QWidget):
                 pending = self._pending_urls()
                 if not pending:
                     return
+                # Enforce conservative pacing in Sentry mode
+                opts.parallel = 1
+                base_delay = max(25000, int(opts.failure_delay_ms))
+                first_url = pending[0]
+                if self._is_album_or_playlist(first_url):
+                    base_delay = max(25000, base_delay)
+                opts.failure_delay_ms = base_delay
+                opts.failure_delay_multiplier = max(1.0, float(opts.failure_delay_multiplier))
+                opts.failure_delay_max_ms = max(int(opts.failure_delay_max_ms), opts.failure_delay_ms)
                 self.runner.start(pending, opts)
 
                 self._set_running(True)
@@ -962,6 +975,10 @@ class MainWindow(QWidget):
     def _toggle_sentry(self, on: bool):
         self._sentry_enabled = bool(on)
         self.s.setValue(KEYS.get("sentry_enabled", "sentry_enabled"), "true" if self._sentry_enabled else "false")
+        try:
+            self._sentry_gap_sec = max(25, int(self.s.value(KEYS.get("sentry_gap_sec", "sentry_gap_sec"), 25)))
+        except Exception:
+            self._sentry_gap_sec = 25
         self._update_sentry_indicator()
 
     # --------------- Persistent terminal (Windows) ---------------
@@ -1027,6 +1044,12 @@ class MainWindow(QWidget):
             self._notify("Still running in tray", "Downloads continue in the background.", 3500)
         else:
             event.accept()
+
+    @staticmethod
+    def _is_album_or_playlist(url: str) -> bool:
+        u = (url or '').lower().strip()
+        return ('/album/' in u or u.startswith('spotify:album:') or
+                '/playlist/' in u or u.startswith('spotify:playlist:'))
 
     # --------------- Utilities ---------------
     @staticmethod

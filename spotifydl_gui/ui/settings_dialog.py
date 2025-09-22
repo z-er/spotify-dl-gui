@@ -25,7 +25,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QPushButton, QFileDialog, QDialogButtonBox, QWidget, QMessageBox, QProgressDialog, QApplication
+    QPushButton, QFileDialog, QDialogButtonBox, QWidget, QMessageBox, QProgressDialog, QApplication,
+    QScrollArea
 )
 
 from ..settings_store import get_settings, KEYS
@@ -95,7 +96,7 @@ class SettingsDialog(QDialog):
 
         # ---------- Sentry Mode ----------
         self.sentry_enabled = QCheckBox("Enable Sentry mode (auto-download from clipboard while idle)")
-        self.sentry_gap_sec = QSpinBox(); self.sentry_gap_sec.setRange(5, 300); self.sentry_gap_sec.setSuffix(" sec")
+        self.sentry_gap_sec = QSpinBox(); self.sentry_gap_sec.setRange(25, 600); self.sentry_gap_sec.setSuffix(" sec")
         self.sentry_hint = QLabel("When enabled, new Spotify links copied to clipboard are added and run automatically with a delay between jobs.")
         self.sentry_hint.setProperty("class", "muted")
 
@@ -128,7 +129,8 @@ class SettingsDialog(QDialog):
         btns.rejected.connect(self.reject)
 
         # ---------- Layout ----------
-        layout = QVBoxLayout(self)
+        content = QWidget()
+        layout = QVBoxLayout(content)
 
         def section(title: str) -> QLabel:
             lab = QLabel(title)
@@ -203,7 +205,14 @@ class SettingsDialog(QDialog):
         br = _hbox([self.bin_edit, self.btn_bin], stretch_last=True)
         layout.addLayout(br)
 
-        layout.addWidget(btns)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(scroll, 1)
+        main_layout.addWidget(btns)
 
         # Load current values
         self._load()
@@ -289,7 +298,7 @@ class SettingsDialog(QDialog):
 
         self.sentry_enabled.setChecked(str(v(KEYS["sentry_enabled"], "false")).lower() == "true")
         try:
-            self.sentry_gap_sec.setValue(int(v(KEYS["sentry_gap_sec"], 25)))
+            self.sentry_gap_sec.setValue(max(25, int(v(KEYS["sentry_gap_sec"], 25))))
         except Exception:
             self.sentry_gap_sec.setValue(25)
 
@@ -327,7 +336,7 @@ class SettingsDialog(QDialog):
         s.setValue(KEYS.get("history_max", "history_max"), str(self.history_max.value()))
 
         s.setValue(KEYS["sentry_enabled"], "true" if self.sentry_enabled.isChecked() else "false")
-        s.setValue(KEYS["sentry_gap_sec"], str(self.sentry_gap_sec.value()))
+        s.setValue(KEYS["sentry_gap_sec"], str(max(25, self.sentry_gap_sec.value())))
 
         s.setValue(KEYS["adaptive_parallel"], "true" if self.adaptive_parallel.isChecked() else "false")
         s.setValue(KEYS.get("failure_delay_ms", "failure_delay_ms"), str(self.failure_delay_ms.value()))

@@ -207,12 +207,20 @@ class Runner(QObject):
             self._failure_delay_multiplier = float(opts.failure_delay_multiplier)
         except Exception:
             self._failure_delay_multiplier = 2.0
+        if self._failure_delay_multiplier <= 0:
+            self._failure_delay_multiplier = 1.0
         try:
             self._failure_delay_max_ms = int(opts.failure_delay_max_ms)
         except Exception:
             self._failure_delay_max_ms = 60000
+        if self._failure_delay_max_ms < self._failure_delay_ms:
+            self._failure_delay_max_ms = self._failure_delay_ms
 
         self._dest = opts.dest
+        if self._sentry_enabled:
+            self._failure_delay_ms = max(self._failure_delay_ms, 25000)
+            if self._failure_delay_max_ms < self._failure_delay_ms:
+                self._failure_delay_max_ms = self._failure_delay_ms
         try:
             self._bin = opts.bin_override.strip() or resolve_spotifydl_binary(self.settings)
         except Exception as e:
