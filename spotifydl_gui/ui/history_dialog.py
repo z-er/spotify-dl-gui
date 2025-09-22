@@ -24,8 +24,10 @@ from typing import List, Dict, Tuple
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QLineEdit, QLabel, QDialogButtonBox, QMessageBox, QComboBox
+    QPushButton, QLineEdit, QLabel, QDialogButtonBox, QMessageBox, QComboBox,
+    QFileDialog
 )
+from ..settings_store import KEYS
 
 
 def _open_path(path: str) -> None:
@@ -106,13 +108,23 @@ class HistoryDialog(QDialog):
         self.btn_requeue.setToolTip("Add the original input URL(s) back to the main queue.")
         self.btn_requeue.clicked.connect(self.requeue_selected)
 
+        self.btn_export = QPushButton("Export visible…")
+        self.btn_export.setToolTip("Export the currently visible rows to a JSON file.")
+        self.btn_export.clicked.connect(self.export_visible)
+
+        self.btn_clear = QPushButton("Clear history")
+        self.btn_clear.setToolTip("Erase all stored history entries (this cannot be undone).")
+        self.btn_clear.clicked.connect(self.clear_history)
+
         actions = QHBoxLayout()
         actions.addWidget(self.btn_open_log)
         actions.addWidget(self.btn_reveal_log)
         actions.addSpacing(8)
         actions.addWidget(self.btn_open_dest)
         actions.addStretch()
+        actions.addWidget(self.btn_export)
         actions.addWidget(self.btn_requeue)
+        actions.addWidget(self.btn_clear)
 
         btns = QDialogButtonBox(QDialogButtonBox.Close)
         btns.rejected.connect(self.reject)
@@ -304,6 +316,39 @@ class HistoryDialog(QDialog):
             QMessageBox.information(self, "No URLs", "Selected runs contain no input URLs.")
             return
         self.sig_requeue.emit(urls)
+
+    def export_visible(self):
+        if not self._visible:
+            QMessageBox.information(self, "Nothing to export", "No entries match the current filter.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export history", "history.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(json.dumps(self._visible, indent=2, ensure_ascii=False), encoding="utf-8")
+            QMessageBox.information(self, "Exported", f"Saved {len(self._visible)} entries to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+
+    def clear_history(self):
+        if QMessageBox.question(
+            self, "Clear history",
+            "This will remove ALL saved history entries.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        ) != QMessageBox.Yes:
+            return
+        try:
+            parent = self.parent()
+            settings = getattr(parent, "s", None)
+            if settings is not None:
+                settings.setValue(KEYS["history"], "[]")
+        except Exception:
+            pass
+        self._all = []
+        self._visible = []
+        self._populate(self._visible)
+        self.stats_lbl.setText("")
+        QMessageBox.information(self, "History cleared", "All history entries have been removed.")
 
     # -------- list helpers --------
     def _selected_job_single(self) -> Dict | None:

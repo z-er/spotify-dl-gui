@@ -36,6 +36,7 @@ KEYS = {
     "m3u_in_folder_when_single": "m3u_in_folder_when_single",
     "bin": "bin",
     "history": "history",
+    "queue_state": "queue_state",
     "scheduler_enabled": "scheduler_enabled",
     "scheduler_time": "scheduler_time",
     "adaptive_parallel": "adaptive_parallel",

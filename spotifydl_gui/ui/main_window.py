@@ -44,6 +44,7 @@ from ..utils import get_app_icon, console_hwnd_for_pid, show_window, resolve_spo
 from .queue_row import QueueRow, QStatus
 from .settings_dialog import SettingsDialog
 from .history_dialog import HistoryDialog
+from .shortcuts_dialog import ShortcutsDialog
 
 
 CLIPBOARD_POLL_MS = 1000
@@ -64,6 +65,7 @@ class MainWindow(QWidget):
         title = QLabel(f"spotify-dl — simple GUI  •  {APP_VER}")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         self.btn_history = QPushButton("History"); self.btn_history.clicked.connect(self.open_history)
+        self.btn_shortcuts = QPushButton("Shortcuts"); self.btn_shortcuts.clicked.connect(self.open_shortcuts)
         self.btn_settings = QPushButton("Settings"); self.btn_settings.clicked.connect(self.open_settings)
         self.btn_quit = QPushButton("Quit")
         self.btn_quit.clicked.connect(self._quit)
@@ -72,6 +74,7 @@ class MainWindow(QWidget):
         hdr.addWidget(title)
         hdr.addStretch()
         hdr.addWidget(self.btn_history)
+        hdr.addWidget(self.btn_shortcuts)
         hdr.addWidget(self.btn_settings)
         hdr.addWidget(self.btn_quit)
 
@@ -85,10 +88,15 @@ class MainWindow(QWidget):
         self.queue.setDefaultDropAction(Qt.MoveAction)
         self.queue.setContextMenuPolicy(Qt.CustomContextMenu)
         self.queue.customContextMenuRequested.connect(self._queue_context_menu)
+        # Persist order on drag-reorder
+        try:
+            self.queue.model().rowsMoved.connect(lambda *args: self._save_queue_state())
+        except Exception:
+            pass
 
         self.btn_add = QPushButton("Add URLs ➜ Queue"); self.btn_add.clicked.connect(self._add_from_staging)
         self.btn_remove = QPushButton("Remove"); self.btn_remove.clicked.connect(self._remove_selected)
-        self.btn_clear = QPushButton("Clear"); self.btn_clear.clicked.connect(self.queue.clear)
+        self.btn_clear = QPushButton("Clear"); self.btn_clear.clicked.connect(self._clear_queue)
         self.btn_up = QPushButton("↑"); self.btn_up.clicked.connect(lambda: self._nudge(-1))
         self.btn_down = QPushButton("↓"); self.btn_down.clicked.connect(lambda: self._nudge(+1))
 
@@ -108,8 +116,14 @@ class MainWindow(QWidget):
         ltop.addWidget(self.btn_up); ltop.addWidget(self.btn_down)
         ltop.addSpacing(8); ltop.addWidget(self.btn_remove); ltop.addWidget(self.btn_clear)
 
+        # Extra queue actions: Retry failed / Remove completed
+        self.btn_retry_failed = QPushButton("Retry failed"); self.btn_retry_failed.clicked.connect(self._retry_failed)
+        self.btn_remove_completed = QPushButton("Remove completed"); self.btn_remove_completed.clicked.connect(self._remove_completed)
+
         lrun = QHBoxLayout()
         lrun.addWidget(self.btn_run); lrun.addWidget(self.btn_pause); lrun.addWidget(self.btn_stop)
+        lrun.addSpacing(8)
+        lrun.addWidget(self.btn_retry_failed); lrun.addWidget(self.btn_remove_completed)
         lrun.addStretch(); lrun.addWidget(self.btn_import); lrun.addWidget(self.btn_export)
 
         left = QVBoxLayout()
@@ -257,6 +271,13 @@ class MainWindow(QWidget):
         self._load_form()
         self._update_bin_pill()
         self._update_sentry_indicator()
+        # Restore previous queue, if any
+        try:
+            self._restore_queue_state()
+        except Exception:
+            pass
+        # Install global keyboard shortcuts
+        self._install_shortcuts()
 
     # --------------- UI helpers ---------------
     def _hline(self):
@@ -364,6 +385,7 @@ class MainWindow(QWidget):
             existing.add(u); added += 1
         if added:
             self._notify("Queued links", f"Added {added} link(s).", 2500)
+            self._save_queue_state()
 
     def _add_from_staging(self):
         urls = [ln.strip() for ln in self.staging.toPlainText().splitlines() if ln.strip()]
@@ -380,6 +402,7 @@ class MainWindow(QWidget):
     def _remove_selected(self):
         for i in reversed(self._selected_rows()):
             self.queue.takeItem(i)
+        self._save_queue_state()
 
     def _nudge(self, delta: int):
         idxs = self._selected_rows()
@@ -390,6 +413,7 @@ class MainWindow(QWidget):
             it = self.queue.takeItem(idx)
             self.queue.insertItem(new, it)
             self.queue.setItemSelected(it, True)
+        self._save_queue_state()
 
         # --------------- Context menu ---------------
     def _queue_context_menu(self, pos):
@@ -411,6 +435,46 @@ class MainWindow(QWidget):
             return
         urls = [self._row(i).url() for i in rows]
         QApplication.clipboard().setText("\n".join(urls))
+
+    # --------------- Shortcuts ---------------
+    def _install_shortcuts(self):
+        from PySide6.QtGui import QAction, QKeySequence
+
+        specs = [
+            ("Ctrl+R", "Run queue", self._run),
+            ("Ctrl+P", "Pause/Resume queue", self._pause_toggle),
+            ("Ctrl+S", "Stop", self._stop),
+            ("Delete", "Remove selected from queue", self._remove_selected),
+            ("Ctrl+I", "Import queue", self._import_queue),
+            ("Ctrl+E", "Export queue", self._export_queue),
+            ("Ctrl+L", "Focus links area", lambda: self.staging.setFocus()),
+            ("Ctrl+Return", "Add URLs from links area", self._add_from_staging),
+            ("Ctrl+D", "Focus destination field", lambda: self.dest.setFocus()),
+            ("Ctrl+B", "Browse destination folder", self._pick_dest),
+            ("Alt+Up", "Move selected up", lambda: self._nudge(-1)),
+            ("Alt+Down", "Move selected down", lambda: self._nudge(+1)),
+            ("Ctrl+H", "Open history", self.open_history),
+            ("Ctrl+,", "Open settings", self.open_settings),
+            ("F1", "Show shortcuts", self.open_shortcuts),
+            ("Ctrl+Q", "Quit", self._quit),
+        ]
+
+        self._actions: list[QAction] = []
+        for keys, _desc, slot in specs:
+            act = QAction(self)
+            act.setShortcut(QKeySequence(keys))
+            act.triggered.connect(slot)
+            act.setShortcutVisibleInContextMenu(False)
+            self.addAction(act)
+            self._actions.append(act)
+
+        # Save list for dialog rendering
+        self._shortcuts_list = [(k, d) for k, d, _ in specs]
+
+    def open_shortcuts(self):
+        entries = getattr(self, "_shortcuts_list", [])
+        dlg = ShortcutsDialog(self, entries)
+        dlg.exec()
 
 
     # --------------- Import / Export queue ---------------
@@ -507,6 +571,7 @@ class MainWindow(QWidget):
 
         # Lock UI controls
         self._set_running(True)
+        self._save_queue_state()
 
     def _stop(self):
         self.runner.stop()
@@ -517,6 +582,7 @@ class MainWindow(QWidget):
             if row.status() in (QStatus.RUNNING, QStatus.PAUSED):
                 row.set_status(QStatus.PENDING)
         self.tail.setVisible(False)
+        self._save_queue_state()
 
     def _pause_toggle(self):
         self.runner.pause_toggle()
@@ -528,8 +594,10 @@ class MainWindow(QWidget):
     def _set_running(self, running: bool):
         for w in [self.staging, self.dest, self.format, self.parallel, self.force, self.extra,
                   self.btn_history, self.btn_settings, self.btn_add, self.btn_remove, self.btn_clear,
-                  self.btn_up, self.btn_down, self.btn_import, self.btn_export]:
-            w.setEnabled(not running)
+                  self.btn_up, self.btn_down, self.btn_import, self.btn_export,
+                  getattr(self, 'btn_retry_failed', None), getattr(self, 'btn_remove_completed', None)]:
+            if w is not None:
+                w.setEnabled(not running)
         self.queue.setEnabled(not running)
         self.btn_run.setEnabled(not running)
         self.btn_stop.setEnabled(running)
@@ -559,6 +627,7 @@ class MainWindow(QWidget):
         if 0 <= idx < self.queue.count():
             self._row(idx).set_status(QStatus.OK if int(summary.code) == 0 else QStatus.FAIL)
         self._append_history(summary)
+        self._save_queue_state()
 
         sus = len(summary.suspects or [])
         body = f"{'OK' if int(summary.code) == 0 else 'Failed'} — files: {len(summary.outputs)}"
@@ -602,6 +671,76 @@ class MainWindow(QWidget):
             if row.status() in (QStatus.PENDING,):
                 urls.append(row.url())
         return urls
+
+    # --------------- Queue persistence ---------------
+    def _save_queue_state(self) -> None:
+        try:
+            items = []
+            for i in range(self.queue.count()):
+                row = self._row(i)
+                st = row.status()
+                # Normalize transient states to PENDING
+                if st in (QStatus.RUNNING, QStatus.PAUSED):
+                    st_name = QStatus.PENDING.name
+                else:
+                    st_name = st.name
+                items.append({"url": row.url(), "status": st_name})
+            self.s.setValue(KEYS.get("queue_state", "queue_state"), json.dumps(items))
+        except Exception:
+            pass
+
+    def _restore_queue_state(self) -> None:
+        try:
+            raw = self.s.value(KEYS.get("queue_state", "queue_state"), "[]")
+            data = json.loads(raw) if raw else []
+        except Exception:
+            data = []
+        if not isinstance(data, list):
+            return
+        if self.queue.count() > 0:
+            return  # don't overwrite an existing live queue
+        for entry in data:
+            try:
+                url = (entry.get("url") or "").strip()
+                st_name = (entry.get("status") or "PENDING").upper()
+                st = QStatus[st_name] if st_name in QStatus.__members__ else QStatus.PENDING
+                if st in (QStatus.RUNNING, QStatus.PAUSED):
+                    st = QStatus.PENDING
+                if not url:
+                    continue
+                roww = QueueRow(url, st)
+                item = QListWidgetItem(self.queue)
+                item.setSizeHint(roww.sizeHint())
+                self.queue.addItem(item)
+                self.queue.setItemWidget(item, roww)
+            except Exception:
+                continue
+
+    def _clear_queue(self):
+        self.queue.clear()
+        self._save_queue_state()
+
+    def _retry_failed(self):
+        changed = 0
+        for i in range(self.queue.count()):
+            row = self._row(i)
+            if row.status() == QStatus.FAIL:
+                row.set_status(QStatus.PENDING)
+                changed += 1
+        if changed:
+            self._notify("Retry queued", f"Reset {changed} failed item(s).", 2500)
+            self._save_queue_state()
+
+    def _remove_completed(self):
+        removed = 0
+        for i in reversed(range(self.queue.count())):
+            row = self._row(i)
+            if row.status() in (QStatus.OK, QStatus.SKIPPED):
+                self.queue.takeItem(i)
+                removed += 1
+        if removed:
+            self._notify("Queue cleaned", f"Removed {removed} completed item(s).", 2500)
+            self._save_queue_state()
 
     # --------------- History persistence ---------------
     def _load_history(self):
@@ -821,6 +960,7 @@ class MainWindow(QWidget):
             urls = [u for u in urls if SPOTIFY_URL_RE.match(u)]
             if urls:
                 self._add_urls(urls, dedupe_history=False)
+                self._save_queue_state()
             e.acceptProposedAction()
         else:
             super().dropEvent(e)
