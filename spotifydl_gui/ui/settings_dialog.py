@@ -1,6 +1,6 @@
 # spotifydl_gui/ui/settings_dialog.py
 """
-Settings dialog (v0.6)
+Settings dialog (v0.7)
 
 Groups:
 - General (open when done, minimize to tray, persistent terminal)
@@ -89,6 +89,10 @@ class SettingsDialog(QDialog):
         self.m3u_export = QCheckBox("Export M3U8 playlist per run")
         self.m3u_in_one_folder = QCheckBox("If all files land in one folder, write M3U8 there (otherwise in _playlists/)")
 
+        # ---------- History ----------
+        self.history_max_lbl = QLabel("History capacity (entries)")
+        self.history_max = QSpinBox(); self.history_max.setRange(10, 5000); self.history_max.setSingleStep(10)
+
         # ---------- Sentry Mode ----------
         self.sentry_enabled = QCheckBox("Enable Sentry mode (auto-download from clipboard while idle)")
         self.sentry_gap_sec = QSpinBox(); self.sentry_gap_sec.setRange(5, 300); self.sentry_gap_sec.setSuffix(" sec")
@@ -163,6 +167,10 @@ class SettingsDialog(QDialog):
         layout.addWidget(section("M3U8 Export"))
         layout.addWidget(self.m3u_export)
         layout.addWidget(self.m3u_in_one_folder)
+
+        # History
+        layout.addWidget(section("History"))
+        layout.addLayout(_hbox([self.history_max_lbl, self.history_max]))
 
         # Runner
         layout.addWidget(section("Runner"))
@@ -250,6 +258,11 @@ class SettingsDialog(QDialog):
         self.m3u_export.setChecked(str(v(KEYS["m3u_export"], "true")).lower() == "true")
         self.m3u_in_one_folder.setChecked(str(v(KEYS["m3u_in_folder_when_single"], "true")).lower() == "true")
 
+        try:
+            self.history_max.setValue(int(v(KEYS.get("history_max", "history_max"), 100)))
+        except Exception:
+            self.history_max.setValue(100)
+
         self.adaptive_parallel.setChecked(str(v(KEYS["adaptive_parallel"], "true")).lower() == "true")
 
         self.sentry_enabled.setChecked(str(v(KEYS["sentry_enabled"], "false")).lower() == "true")
@@ -288,6 +301,8 @@ class SettingsDialog(QDialog):
 
         s.setValue(KEYS["m3u_export"], "true" if self.m3u_export.isChecked() else "false")
         s.setValue(KEYS["m3u_in_folder_when_single"], "true" if self.m3u_in_one_folder.isChecked() else "false")
+
+        s.setValue(KEYS.get("history_max", "history_max"), str(self.history_max.value()))
 
         s.setValue(KEYS["sentry_enabled"], "true" if self.sentry_enabled.isChecked() else "false")
         s.setValue(KEYS["sentry_gap_sec"], str(self.sentry_gap_sec.value()))

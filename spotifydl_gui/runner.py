@@ -1,6 +1,6 @@
 # spotifydl_gui/runner.py
 """
-Queue runner for spotify-dl GUI (v0.6).
+Queue runner for spotify-dl GUI (v0.7).
 
 Responsibilities
 - Spawn spotify-dl via QProcess per-URL, stream merged stdout/stderr

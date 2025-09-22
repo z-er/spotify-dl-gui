@@ -11,7 +11,7 @@ from PySide6.QtCore import QSettings
 # Application metadata
 APP_NAME = "spotify-dl GUI"
 APP_ORG = "JoshTools"
-APP_VER = "v0.6"
+APP_VER = "v0.7"
 
 # Common keys (to avoid typos)
 KEYS = {
@@ -36,6 +36,7 @@ KEYS = {
     "m3u_in_folder_when_single": "m3u_in_folder_when_single",
     "bin": "bin",
     "history": "history",
+    "history_max": "history_max",
     "queue_state": "queue_state",
     "scheduler_enabled": "scheduler_enabled",
     "scheduler_time": "scheduler_time",

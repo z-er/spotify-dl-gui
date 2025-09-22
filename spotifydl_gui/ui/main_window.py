@@ -1,6 +1,6 @@
 # spotifydl_gui/ui/main_window.py
 """
-MainWindow — wires UI + Runner + Settings + History for spotify-dl GUI v0.6
+MainWindow — wires UI + Runner + Settings + History for spotify-dl GUI v0.7
 
 Features:
 - Queue panel with per-row progress bars (QueueRow)
@@ -30,8 +30,8 @@ import subprocess
 from pathlib import Path
 from typing import List
 
-from PySide6.QtCore import Qt, QTimer, QTime
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt, QTimer, QTime, QUrl
+from PySide6.QtGui import QAction, QIcon, QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox,
     QSpinBox, QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QMenu, QSystemTrayIcon,
@@ -158,9 +158,12 @@ class MainWindow(QWidget):
 
         self.backoff_label = QLabel(""); self.backoff_label.setProperty("class", "muted")
         self.adapt_label = QLabel(""); self.adapt_label.setProperty("class", "muted")
+        self.time_label = QLabel(""); self.time_label.setProperty("class", "muted")
 
         util = QHBoxLayout()
         util.addWidget(self.adapt_label)
+        util.addSpacing(8)
+        util.addWidget(self.time_label)
         util.addStretch()
         util.addWidget(self.backoff_label)
 
@@ -278,6 +281,13 @@ class MainWindow(QWidget):
             pass
         # Install global keyboard shortcuts
         self._install_shortcuts()
+        # Runtime tracking for progress/ETA and Windows taskbar
+        self._taskbar_btn = None
+        self._taskbar_prog = None
+        self._last_cmd = ""
+        self._current_job_started_ts = None
+        self._current_job_total = 0
+        self._current_job_index = -1
 
     # --------------- UI helpers ---------------
     def _hline(self):
@@ -313,8 +323,10 @@ class MainWindow(QWidget):
     def _update_bin_pill(self):
         try:
             path = resolve_spotifydl_binary(self.s)
-            text = f"Binary: {Path(path).name}"
-            tip = path
+            ver = self._get_spotifydl_version(path)
+            ver_txt = f" ({ver})" if ver else ""
+            text = f"Binary: {Path(path).name}{ver_txt}"
+            tip = path if not ver else f"{path}\nVersion: {ver}"
             bg = "#1b2a22"; border = "#2a2f39"; color = "#e6eaf2"
         except Exception:
             text = "Binary: Not found"
@@ -331,6 +343,15 @@ class MainWindow(QWidget):
                 padding: 6px 10px;
             }}
         """)
+
+    def _get_spotifydl_version(self, exe_path: str) -> str | None:
+        try:
+            import subprocess
+            out = subprocess.run([exe_path, "--version"], capture_output=True, text=True, timeout=2)
+            txt = (out.stdout or out.stderr or "").strip()
+            return txt.splitlines()[0].strip() if txt else None
+        except Exception:
+            return None
 
     def _update_sentry_indicator(self):
         if getattr(self, "_sentry_enabled", False):
@@ -420,9 +441,11 @@ class MainWindow(QWidget):
         menu = QMenu(self)
         act_copy = QAction("Copy URL", self); act_copy.triggered.connect(self._ctx_copy_url)
         act_remove = QAction("Remove", self); act_remove.triggered.connect(self._remove_selected)
+        act_open_sp = QAction("Open in Spotify", self); act_open_sp.triggered.connect(self._ctx_open_in_spotify)
         act_up = QAction("Move up", self); act_up.triggered.connect(lambda: self._nudge(-1))
         act_down = QAction("Move down", self); act_down.triggered.connect(lambda: self._nudge(+1))
         menu.addAction(act_copy)
+        menu.addAction(act_open_sp)
         menu.addSeparator()
         menu.addAction(act_up); menu.addAction(act_down)
         menu.addSeparator()
@@ -435,6 +458,16 @@ class MainWindow(QWidget):
             return
         urls = [self._row(i).url() for i in rows]
         QApplication.clipboard().setText("\n".join(urls))
+
+    def _ctx_open_in_spotify(self):
+        rows = self._selected_rows()
+        if not rows:
+            return
+        url = self._row(rows[0]).url()
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
 
     # --------------- Shortcuts ---------------
     def _install_shortcuts(self):
@@ -583,6 +616,9 @@ class MainWindow(QWidget):
                 row.set_status(QStatus.PENDING)
         self.tail.setVisible(False)
         self._save_queue_state()
+        self._taskbar_reset()
+        if self.tray:
+            self.tray.setToolTip("Idle")
 
     def _pause_toggle(self):
         self.runner.pause_toggle()
@@ -614,6 +650,11 @@ class MainWindow(QWidget):
             self.queue.setCurrentRow(idx)
         self.tail.clear(); self.tail.setVisible(True)
         self._notify("Starting", f"Job {idx+1}/{total}")
+        self._current_job_started_ts = time.time()
+        self._current_job_total = total
+        self._current_job_index = idx
+        self._update_taskbar_progress(0)
+        self._update_tray_tooltip(0)
 
     def _on_job_log(self, idx: int, chunk: str):
         self.tail.moveCursor(self.tail.textCursor().End)
@@ -622,6 +663,22 @@ class MainWindow(QWidget):
     def _on_job_progress(self, idx: int, pct: int):
         if 0 <= idx < self.queue.count():
             self._row(idx).set_progress(pct)
+        # elapsed / ETA
+        if getattr(self, "_current_job_started_ts", None):
+            try:
+                elapsed = int(time.time() - float(self._current_job_started_ts))
+            except Exception:
+                elapsed = 0
+            eta = None
+            if pct > 0:
+                remaining = elapsed * (100 - pct) / max(1, pct)
+                try:
+                    eta = int(remaining)
+                except Exception:
+                    eta = None
+            self.time_label.setText(self._fmt_elapsed_eta(elapsed, eta))
+        self._update_taskbar_progress(pct)
+        self._update_tray_tooltip(pct)
 
     def _on_job_finished(self, idx: int, summary):
         if 0 <= idx < self.queue.count():
@@ -635,6 +692,10 @@ class MainWindow(QWidget):
         if summary.log_path:
             body += f"\nLog: {Path(summary.log_path).name}"
         self._notify("Download finished", body, 6000)
+        # reset job timer label
+        self.time_label.setText("")
+        self._update_taskbar_progress(0 if int(summary.code) != 0 else 100)
+        self._update_tray_tooltip(100)
 
     def _on_queue_finished(self, totals):
         self._set_running(False)
@@ -642,6 +703,9 @@ class MainWindow(QWidget):
         self._notify("Queue complete",
                      f"OK: {totals.ok}  •  Fail: {totals.fail}  •  Suspects: {totals.suspect}",
                      7000)
+        self._taskbar_reset()
+        if self.tray:
+            self.tray.setToolTip("Idle")
         if totals.ok > 0 and self._read_bool(KEYS["open_when_done"], False):
             d = self.dest.text().strip()
             if d and Path(d).exists():
@@ -660,6 +724,7 @@ class MainWindow(QWidget):
         if platform.system() == "Windows" and self._read_bool(KEYS["persistent_terminal"], False):
             self._ensure_persistent_terminal(start_hidden=True)
             self._send_to_persistent(cmd)
+        self._last_cmd = cmd
     
         # --------------- Pending selection ---------------
     def _pending_urls(self) -> list[str]:
@@ -751,7 +816,12 @@ class MainWindow(QWidget):
 
     def _save_history(self, hist):
         try:
-            self.s.setValue(KEYS["history"], json.dumps(hist[-100:]))
+            try:
+                cap = int(self.s.value(KEYS.get("history_max", "history_max"), 100))
+            except Exception:
+                cap = 100
+            cap = max(10, int(cap))
+            self.s.setValue(KEYS["history"], json.dumps(hist[-cap:]))
         except Exception:
             pass
 
@@ -964,3 +1034,64 @@ class MainWindow(QWidget):
             e.acceptProposedAction()
         else:
             super().dropEvent(e)
+
+    # --------------- Taskbar/tray helpers ---------------
+    def _ensure_taskbar(self):
+        if platform.system() != "Windows" or self._taskbar_btn is not None:
+            return
+        try:
+            from PySide6.QtWinExtras import QWinTaskbarButton
+            self._taskbar_btn = QWinTaskbarButton(self)
+            self._taskbar_btn.setWindow(self.windowHandle())
+            self._taskbar_prog = self._taskbar_btn.progress()
+            self._taskbar_prog.setRange(0, 100)
+            self._taskbar_prog.reset()
+        except Exception:
+            self._taskbar_btn = None
+            self._taskbar_prog = None
+
+    def _update_taskbar_progress(self, pct: int):
+        self._ensure_taskbar()
+        if self._taskbar_prog:
+            try:
+                self._taskbar_prog.show()
+                self._taskbar_prog.setValue(int(max(0, min(100, pct))))
+            except Exception:
+                pass
+
+    def _taskbar_reset(self):
+        if self._taskbar_prog:
+            try:
+                self._taskbar_prog.reset()
+            except Exception:
+                pass
+
+    def _update_tray_tooltip(self, pct: int):
+        if not self.tray:
+            return
+        try:
+            if self.runner and self.runner.is_running():
+                idx = self._current_job_index + 1 if self._current_job_index >= 0 else 1
+                total = max(1, int(self._current_job_total or 1))
+                tip = f"Job {idx}/{total} — {pct}%"
+                if self.time_label.text():
+                    tip += f" — {self.time_label.text()}"
+                self.tray.setToolTip(tip)
+            else:
+                self.tray.setToolTip("Idle")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fmt_secs(n: int) -> str:
+        h = n // 3600
+        m = (n % 3600) // 60
+        s = n % 60
+        if h > 0:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        return f"{m:d}:{s:02d}"
+
+    def _fmt_elapsed_eta(self, elapsed: int, eta: int | None) -> str:
+        if eta is None:
+            return f"Elapsed {self._fmt_secs(elapsed)}"
+        return f"Elapsed {self._fmt_secs(elapsed)} • ETA {self._fmt_secs(max(0, int(eta)))}"
