@@ -43,6 +43,9 @@ KEYS = {
     "adaptive_parallel": "adaptive_parallel",
     "sentry_enabled": "sentry_enabled",
     "sentry_gap_sec": "sentry_gap_sec",
+    "failure_delay_ms": "failure_delay_ms",
+    "failure_delay_multiplier": "failure_delay_multiplier",
+    "failure_delay_max_ms": "failure_delay_max_ms",
 
 }
 

@@ -69,6 +69,9 @@ class RunOptions:
     bin_override: str = ""       # optional; otherwise resolve
     sentry_enabled: bool = False
     sentry_gap_sec: int = 25
+    failure_delay_ms: int = 2000
+    failure_delay_multiplier: float = 2.0
+    failure_delay_max_ms: int = 60000
 
     def to_args(self) -> List[str]:
         args = []
@@ -81,6 +84,11 @@ class RunOptions:
             args += ["--force"]
         if self.extra.strip():
             args += shlex.split(self.extra)
+        args += [
+            "--failure-delay-ms", str(int(self.failure_delay_ms)),
+            "--failure-delay-multiplier", str(float(self.failure_delay_multiplier)),
+            "--failure-delay-max-ms", str(int(self.failure_delay_max_ms)),
+        ]
         # args += ["--verbose"]  # if your fork supports it
         return args
 
@@ -158,6 +166,9 @@ class Runner(QObject):
         self._smart_sync: bool = True
         self._sentry_enabled: bool = False
         self._sentry_gap_sec: int = 25
+        self._failure_delay_ms: int = 2000
+        self._failure_delay_multiplier: float = 2.0
+        self._failure_delay_max_ms: int = 60000
 
         # Paths
         self._dest: str = ""
@@ -188,6 +199,18 @@ class Runner(QObject):
             self._sentry_gap_sec = int(opts.sentry_gap_sec)
         except Exception:
             self._sentry_gap_sec = 25
+        try:
+            self._failure_delay_ms = int(opts.failure_delay_ms)
+        except Exception:
+            self._failure_delay_ms = 2000
+        try:
+            self._failure_delay_multiplier = float(opts.failure_delay_multiplier)
+        except Exception:
+            self._failure_delay_multiplier = 2.0
+        try:
+            self._failure_delay_max_ms = int(opts.failure_delay_max_ms)
+        except Exception:
+            self._failure_delay_max_ms = 60000
 
         self._dest = opts.dest
         try:
@@ -236,6 +259,11 @@ class Runner(QObject):
             args += ["--force"]
         if opts.extra.strip():
             args += shlex.split(opts.extra)
+        args += [
+            "--failure-delay-ms", str(int(opts.failure_delay_ms)),
+            "--failure-delay-multiplier", str(float(opts.failure_delay_multiplier)),
+            "--failure-delay-max-ms", str(int(opts.failure_delay_max_ms)),
+        ]
         return args
 
     def _schedule_next_job(self, delay_sec: int, opts: Optional[RunOptions]):
@@ -280,6 +308,9 @@ class Runner(QObject):
             opts.bin_override = self._bin or ""
             opts.sentry_enabled = self._sentry_enabled
             opts.sentry_gap_sec = self._sentry_gap_sec
+            opts.failure_delay_ms = self._failure_delay_ms
+            opts.failure_delay_multiplier = self._failure_delay_multiplier
+            opts.failure_delay_max_ms = self._failure_delay_max_ms
 
 
         url = self._urls[self._idx]
