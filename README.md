@@ -22,7 +22,7 @@ Current version: **v0.8** as of 22/09/2025
 - Spotify Premium account (required by spotify-dl)
 
 ### Install
-> [!INFORMATION]
+> [!IMPORTANT]
 > Grab the latest release [here!](https://github.com/z-er/spotify-dl-gui/releases)
 
 ## Disclaimer
