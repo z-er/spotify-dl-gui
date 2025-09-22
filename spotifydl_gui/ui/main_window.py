@@ -303,6 +303,18 @@ class MainWindow(QWidget):
     def _read_bool(self, key: str, default: bool) -> bool:
         return str(self.s.value(key, "true" if default else "false")).lower() == "true"
 
+    def _read_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.s.value(key, default))
+        except Exception:
+            return default
+
+    def _read_float(self, key: str, default: float) -> float:
+        try:
+            return float(self.s.value(key, default))
+        except Exception:
+            return default
+
     def _load_form(self):
         self.dest.setText(self.s.value(KEYS["dest"], ""))
         self.format.setCurrentText(self.s.value(KEYS["format"], "flac"))
@@ -593,6 +605,9 @@ class MainWindow(QWidget):
             smart_sync=self._read_bool("smart_sync", True),
             adaptive_parallel=self._read_bool(KEYS["adaptive_parallel"], True),
             bin_override=self.s.value(KEYS["bin"], "").strip(),
+            failure_delay_ms=self._read_int(KEYS.get("failure_delay_ms", "failure_delay_ms"), 2000),
+            failure_delay_multiplier=self._read_float(KEYS.get("failure_delay_multiplier", "failure_delay_multiplier"), 2.0),
+            failure_delay_max_ms=self._read_int(KEYS.get("failure_delay_max_ms", "failure_delay_max_ms"), 60000),
         )
 
         # Kick off
@@ -655,10 +670,17 @@ class MainWindow(QWidget):
         self._current_job_index = idx
         self._update_taskbar_progress(0)
         self._update_tray_tooltip(0)
+        self.backoff_label.clear()
 
     def _on_job_log(self, idx: int, chunk: str):
         self.tail.moveCursor(self.tail.textCursor().End)
         self.tail.insertPlainText(chunk)
+        lower = chunk.lower()
+        if "[rate-limit" in lower:
+            for line in chunk.splitlines():
+                if "[rate-limit" in line.lower():
+                    self.backoff_label.setText(line.strip())
+                    break
 
     def _on_job_progress(self, idx: int, pct: int):
         if 0 <= idx < self.queue.count():
@@ -909,6 +931,9 @@ class MainWindow(QWidget):
                     # Sentry
                     sentry_enabled=True,
                     sentry_gap_sec=max(5, int(self._sentry_gap_sec)),
+                    failure_delay_ms=self._read_int(KEYS.get("failure_delay_ms", "failure_delay_ms"), 2000),
+                    failure_delay_multiplier=self._read_float(KEYS.get("failure_delay_multiplier", "failure_delay_multiplier"), 2.0),
+                    failure_delay_max_ms=self._read_int(KEYS.get("failure_delay_max_ms", "failure_delay_max_ms"), 60000),
                 )
                 pending = self._pending_urls()
                 if not pending:

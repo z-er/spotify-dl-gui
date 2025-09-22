@@ -101,6 +101,13 @@ class SettingsDialog(QDialog):
 
         # ---------- Runner ----------
         self.adaptive_parallel = QCheckBox("Adaptive parallelism (auto-adjust --parallel on failures/successes)")
+        self.failure_delay_ms = QSpinBox(); self.failure_delay_ms.setRange(0, 600000); self.failure_delay_ms.setSingleStep(100)
+        self.failure_delay_ms.setSuffix(" ms")
+        self.failure_delay_multiplier = QDoubleSpinBox(); self.failure_delay_multiplier.setRange(1.0, 10.0); self.failure_delay_multiplier.setSingleStep(0.1)
+        self.failure_delay_multiplier.setDecimals(2)
+        self.failure_delay_multiplier.setSuffix(" ×")
+        self.failure_delay_max_ms = QSpinBox(); self.failure_delay_max_ms.setRange(0, 600000); self.failure_delay_max_ms.setSingleStep(100)
+        self.failure_delay_max_ms.setSuffix(" ms")
 
         # ---------- Scheduler ----------
         self.scheduler_enabled = QCheckBox("Enable daily scheduler")
@@ -175,6 +182,9 @@ class SettingsDialog(QDialog):
         # Runner
         layout.addWidget(section("Runner"))
         layout.addWidget(self.adaptive_parallel)
+        layout.addLayout(_hbox([QLabel("Failure delay base"), self.failure_delay_ms], stretch_last=True))
+        layout.addLayout(_hbox([QLabel("Failure delay multiplier"), self.failure_delay_multiplier], stretch_last=True))
+        layout.addLayout(_hbox([QLabel("Failure delay max"), self.failure_delay_max_ms], stretch_last=True))
 
         # Scheduler
         layout.addWidget(section("Scheduler"))
@@ -264,6 +274,18 @@ class SettingsDialog(QDialog):
             self.history_max.setValue(100)
 
         self.adaptive_parallel.setChecked(str(v(KEYS["adaptive_parallel"], "true")).lower() == "true")
+        try:
+            self.failure_delay_ms.setValue(int(v(KEYS.get("failure_delay_ms", "failure_delay_ms"), 2000)))
+        except Exception:
+            self.failure_delay_ms.setValue(2000)
+        try:
+            self.failure_delay_multiplier.setValue(float(v(KEYS.get("failure_delay_multiplier", "failure_delay_multiplier"), 2.0)))
+        except Exception:
+            self.failure_delay_multiplier.setValue(2.0)
+        try:
+            self.failure_delay_max_ms.setValue(int(v(KEYS.get("failure_delay_max_ms", "failure_delay_max_ms"), 60000)))
+        except Exception:
+            self.failure_delay_max_ms.setValue(60000)
 
         self.sentry_enabled.setChecked(str(v(KEYS["sentry_enabled"], "false")).lower() == "true")
         try:
@@ -308,6 +330,9 @@ class SettingsDialog(QDialog):
         s.setValue(KEYS["sentry_gap_sec"], str(self.sentry_gap_sec.value()))
 
         s.setValue(KEYS["adaptive_parallel"], "true" if self.adaptive_parallel.isChecked() else "false")
+        s.setValue(KEYS.get("failure_delay_ms", "failure_delay_ms"), str(self.failure_delay_ms.value()))
+        s.setValue(KEYS.get("failure_delay_multiplier", "failure_delay_multiplier"), str(self.failure_delay_multiplier.value()))
+        s.setValue(KEYS.get("failure_delay_max_ms", "failure_delay_max_ms"), str(self.failure_delay_max_ms.value()))
 
         s.setValue(KEYS["scheduler_enabled"], "true" if self.scheduler_enabled.isChecked() else "false")
         s.setValue(KEYS["scheduler_time"], self.scheduler_time.text().strip())
