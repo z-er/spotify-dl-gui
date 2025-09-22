@@ -678,8 +678,8 @@ class MainWindow(QWidget):
 
     def _on_job_log(self, idx: int, chunk: str):
         tc = self.tail.textCursor()
-tc.movePosition(QTextCursor.End)
-self.tail.setTextCursor(tc)
+        tc.movePosition(QTextCursor.End)
+        self.tail.setTextCursor(tc)
         self.tail.insertPlainText(chunk)
         lower = chunk.lower()
         if "[rate-limit" in lower:
