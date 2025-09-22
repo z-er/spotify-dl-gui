@@ -1,6 +1,7 @@
 <p align="center">
   <img src="assets/logo.png" alt="spotify-dl-gui logo" width="128"/>
 </p>
+
 # spotify-dl GUI
 
 A modern, dark-themed desktop GUI wrapper for [spotify-dl](https://github.com/GuillemCastro/spotify-dl), built with Python + PySide6.
