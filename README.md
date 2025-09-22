@@ -9,6 +9,7 @@ Easily download your Spotify playlists, albums, and tracks with one click, organ
 
 > [!CAUTION]
 > This app is best used with my own version of [spotify-dl](https://github.com/z-er/spotify-dl), which has been updated to include more functionality.
+> **I've been made aware the app is flagged by Windows Security- this is a false-positive, a result of using python packaging. You can see the code!**
 
 Current version: **v0.8** as of 22/09/2025
 
