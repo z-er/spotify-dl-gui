@@ -67,48 +67,6 @@ TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 - [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or use provided binary)
 - Spotify Premium account (required by spotify-dl)
 
-### Installation
-
-Clone this repo:
-
-```bash
-git clone https://github.com/yourusername/spotify-dl-gui.git
-cd spotify-dl-gui
-```
-
-Create a virtual environment & install dependencies:
-
-```bash
-python -m venv .venv
-.\.venv\Scripts\activate  # (Windows)
-# or source .venv/bin/activate (Linux/macOS)
-
-pip install -r requirements.txt
-```
-
-### Run
-
-```bash
-python -m spotifydl_gui
-```
-
-The app should open with the dark-themed GUI. On first run, `spotify-dl` will prompt you to log in via your terminal.
-
----
-
-## Packaging
-
-To build an executable for distribution, you can use [PyInstaller](https://pyinstaller.org/):
-
-```bash
-pip install pyinstaller
-pyinstaller --name "spotify-dl-gui" --icon spotify-dl-gui.ico --noconsole -w spotifydl_gui/main.py
-```
-
-This will generate a standalone `spotify-dl-gui.exe` in `dist/`.
-
----
-
 ## Disclaimer
 
 This tool is a community-built GUI for [spotify-dl](https://github.com/GuillemCastro/spotify-dl).
@@ -117,20 +75,6 @@ You are responsible for how you use this software.
 
 ---
 
-## Roadmap
-
-* [x] Queue system with pause/resume
-* [x] History & logs
-* [x] Dark theme with tray support
-* [x] Sentry mode (hands-off clipboard capture)
-* [x] One-click library reorganization
-* [x] Queue persistence on restart
-* [ ] Search/filter in queue
-* [ ] Stats dashboard (library size, formats, duplicates)
-* [ ] Auto-update check
-* [ ] Headless mode (background service)
-
----
 
 ## What’s New in v0.7
 
