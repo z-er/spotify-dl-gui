@@ -3,7 +3,10 @@
 A modern, dark-themed desktop GUI wrapper for [spotify-dl](https://github.com/GuillemCastro/spotify-dl), built with Python + PySide6.
 Easily download your Spotify playlists, albums, and tracks with one click, organize your library automatically, and run in the background with Sentry mode.
 
-Current version: v0.8
+> [!CAUTION]
+> This app is best used with my own version of [spotify-dl](https://github.com/z-er/spotify-dl), which has been updated to include more functionality.
+
+Current version: **v0.8** as of 22/09/2025
 
 ---
 
@@ -64,7 +67,7 @@ TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 
 ### Prerequisites
 - Python 3.10+ (tested with 3.11)
-- [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or use provided binary)
+- [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or [use provided binary](https://github.com/z-er/spotify-dl))
 - Spotify Premium account (required by spotify-dl)
 
 ## Disclaimer
