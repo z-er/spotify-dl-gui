@@ -1,24 +1,30 @@
 # spotifydl_gui/ui/history_dialog.py
 """
-History viewer dialog.
+History viewer dialog (enhanced).
 
-Displays past job summaries with quick actions:
-- Open selected log file
-- Open destination folder
-- Filter by text (artist / album / URL / status)
+Adds:
+- Search box (artist / album / URL / dest)
+- Status filter: All / OK / Failed / Has Suspects
+- Stats header (jobs, ok, fail, suspects, total size if log contains it)
+- "Re-queue selected" button that emits the original URLs of selected jobs
+
+Assumptions:
+- Each history entry is a dict like we store in MainWindow._append_history(...)
+- If log_path exists and contains a JSON summary, we try to compute total size.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QLineEdit, QLabel, QDialogButtonBox, QMessageBox
+    QPushButton, QLineEdit, QLabel, QDialogButtonBox, QMessageBox, QComboBox
 )
 
 
@@ -38,7 +44,6 @@ def _reveal_in_folder(path: str) -> None:
     p = Path(path)
     try:
         if sys.platform.startswith("win"):
-            # Show in Explorer with selection
             if p.exists():
                 os.spawnl(os.P_NOWAIT, "C:\\Windows\\explorer.exe", "explorer", f'/select,"{str(p)}"')
             else:
@@ -49,32 +54,47 @@ def _reveal_in_folder(path: str) -> None:
             else:
                 os.spawnlp(os.P_NOWAIT, "open", "open", str(p.parent))
         else:
-            # Linux: best effort — open folder
             _open_path(str(p.parent))
     except Exception:
         _open_path(str(p.parent))
 
 
 class HistoryDialog(QDialog):
+    # Emits a list of original input URLs to re-queue
+    sig_requeue = Signal(list)
+
     def __init__(self, parent, history: List[Dict]):
         super().__init__(parent)
         self.setWindowTitle("History")
-        self.setMinimumSize(760, 520)
+        self.setMinimumSize(820, 560)
         self._all = history or []
+        self._visible: List[Dict] = list(self._all)
 
-        # Header + filter
+        # ----- Header: title + search + status filter -----
         title = QLabel("Previous runs"); title.setStyleSheet("font-size: 15px; font-weight: 600;")
-        self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Filter by artist, album, URL, or status…")
+        self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Search artist, album, URL, or destination…")
         self.filter_edit.textChanged.connect(self._apply_filter)
 
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["All", "OK", "Failed", "Has suspects"])
+        self.status_combo.currentIndexChanged.connect(self._apply_filter)
+
         header = QHBoxLayout()
-        header.addWidget(title); header.addStretch(); header.addWidget(self.filter_edit)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(QLabel("Status"))
+        header.addWidget(self.status_combo)
+        header.addWidget(self.filter_edit)
 
-        # List
+        # ----- Stats bar -----
+        self.stats_lbl = QLabel("")
+        self.stats_lbl.setProperty("class", "muted")
+
+        # ----- List -----
         self.list = QListWidget()
-        self._populate(self._all)
+        self.list.setSelectionMode(QListWidget.ExtendedSelection)
 
-        # Buttons
+        # ----- Actions -----
         self.btn_open_log = QPushButton("Open log")
         self.btn_open_log.clicked.connect(self.open_log)
         self.btn_reveal_log = QPushButton("Reveal log in folder")
@@ -82,26 +102,38 @@ class HistoryDialog(QDialog):
         self.btn_open_dest = QPushButton("Open destination")
         self.btn_open_dest.clicked.connect(self.open_dest)
 
+        self.btn_requeue = QPushButton("Re-queue selected")
+        self.btn_requeue.setToolTip("Add the original input URL(s) back to the main queue.")
+        self.btn_requeue.clicked.connect(self.requeue_selected)
+
         actions = QHBoxLayout()
         actions.addWidget(self.btn_open_log)
         actions.addWidget(self.btn_reveal_log)
         actions.addSpacing(8)
         actions.addWidget(self.btn_open_dest)
         actions.addStretch()
+        actions.addWidget(self.btn_requeue)
 
         btns = QDialogButtonBox(QDialogButtonBox.Close)
         btns.rejected.connect(self.reject)
         btns.accepted.connect(self.accept)
         btns.button(QDialogButtonBox.Close).clicked.connect(self.close)
 
-        # Layout
+        # ----- Layout -----
         layout = QVBoxLayout(self)
         layout.addLayout(header)
+        layout.addWidget(self.stats_lbl)
         layout.addWidget(self.list, 1)
         layout.addLayout(actions)
         layout.addWidget(btns)
 
+        # Bootstrap view
+        self._refresh()
+
     # -------- internal helpers --------
+    def _refresh(self):
+        self._apply_filter(update_list_only=False)
+
     def _populate(self, jobs: List[Dict]) -> None:
         self.list.clear()
         for job in jobs:
@@ -132,30 +164,105 @@ class HistoryDialog(QDialog):
             item.setData(Qt.UserRole, job)
             self.list.addItem(item)
 
-    def _selected_job(self) -> Dict | None:
-        it = self.list.currentItem()
-        return it.data(Qt.UserRole) if it else None
+    def _selected_jobs(self) -> List[Dict]:
+        items = self.list.selectedItems()
+        return [it.data(Qt.UserRole) for it in items] if items else []
 
-    def _apply_filter(self, text: str) -> None:
-        t = (text or "").lower().strip()
-        if not t:
-            self._populate(self._all)
-            return
+    def _apply_filter(self, *_args, update_list_only: bool = True) -> None:
+        # Text filter
+        t = (self.filter_edit.text() or "").lower().strip()
+        # Status filter
+        mode = self.status_combo.currentText()
+
         filtered = []
         for job in self._all:
+            # status logic
+            code = int(job.get("code", -1))
+            suspect = int(job.get("suspect", 0))
+            if mode == "OK" and code != 0:
+                continue
+            if mode == "Failed" and code == 0:
+                continue
+            if mode == "Has suspects" and suspect <= 0:
+                continue
+
+            if not t:
+                filtered.append(job); continue
+
             fields = [
                 job.get("first_artist", ""), job.get("first_album", ""),
                 job.get("input", ""), job.get("dest", ""), job.get("start_iso", ""),
-                "ok" if int(job.get("code", -1)) == 0 else "fail",
             ]
             joined = " ".join(f for f in fields if f).lower()
             if t in joined:
                 filtered.append(job)
-        self._populate(filtered)
+
+        self._visible = filtered
+        self._populate(self._visible)
+
+        # Recompute stats if requested
+        if not update_list_only:
+            jobs_stats, total_size = self._compute_stats(self._all)
+            ok = jobs_stats["ok"]; fail = jobs_stats["fail"]; sus = jobs_stats["suspects"]
+            if total_size is None:
+                size_text = ""
+            else:
+                size_text = f" • Size: {self._fmt_size(total_size)}"
+            self.stats_lbl.setText(
+                f"Jobs: {len(self._all)} • OK: {ok} • Fail: {fail} • With suspects: {sus}{size_text}"
+            )
+
+    # -------- stats helpers --------
+    def _compute_stats(self, jobs: List[Dict]) -> Tuple[Dict[str, int], int | None]:
+        ok = fail = sus = 0
+        total_size: int | None = 0
+        for j in jobs:
+            if int(j.get("code", -1)) == 0:
+                ok += 1
+            else:
+                fail += 1
+            if int(j.get("suspect", 0)) > 0:
+                sus += 1
+
+            # Try to read output sizes from log JSON
+            lp = j.get("log_path", "")
+            if not lp or not Path(lp).exists():
+                total_size = None if total_size == 0 else total_size
+                continue
+            try:
+                # Read tail of file to find JSON summary (we wrote it after '=== Summary (JSON) ===')
+                txt = Path(lp).read_text(encoding="utf-8", errors="ignore")
+                sep = "\n=== Summary (JSON) ===\n"
+                if sep in txt:
+                    js = txt.split(sep, 1)[1]
+                    data = json.loads(js)
+                    outs = data.get("outputs", [])
+                    for o in outs:
+                        sz = int(o.get("size", 0))
+                        if total_size is not None:
+                            total_size += max(0, sz)
+                else:
+                    total_size = None if total_size == 0 else total_size
+            except Exception:
+                total_size = None if total_size == 0 else total_size
+
+        return {"ok": ok, "fail": fail, "suspects": sus}, total_size
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        # bytes -> human
+        step = 1024.0
+        units = ["B", "KB", "MB", "GB", "TB"]
+        s = float(n)
+        for u in units:
+            if s < step:
+                return f"{s:.2f} {u}"
+            s /= step
+        return f"{s:.2f} PB"
 
     # -------- actions --------
     def open_log(self):
-        job = self._selected_job()
+        job = self._selected_job_single()
         if not job:
             return
         p = job.get("log_path", "")
@@ -165,7 +272,7 @@ class HistoryDialog(QDialog):
         _open_path(p)
 
     def reveal_log(self):
-        job = self._selected_job()
+        job = self._selected_job_single()
         if not job:
             return
         p = job.get("log_path", "")
@@ -174,7 +281,7 @@ class HistoryDialog(QDialog):
         _reveal_in_folder(p)
 
     def open_dest(self):
-        job = self._selected_job()
+        job = self._selected_job_single()
         if not job:
             return
         d = job.get("dest", "")
@@ -182,3 +289,23 @@ class HistoryDialog(QDialog):
             QMessageBox.information(self, "Missing folder", "Destination folder no longer exists.")
             return
         _open_path(d)
+
+    def requeue_selected(self):
+        jobs = self._selected_jobs()
+        if not jobs:
+            QMessageBox.information(self, "Nothing selected", "Select one or more runs to re-queue.")
+            return
+        urls = []
+        for j in jobs:
+            u = (j.get("input") or "").strip()
+            if u:
+                urls.append(u)
+        if not urls:
+            QMessageBox.information(self, "No URLs", "Selected runs contain no input URLs.")
+            return
+        self.sig_requeue.emit(urls)
+
+    # -------- list helpers --------
+    def _selected_job_single(self) -> Dict | None:
+        it = self.list.currentItem()
+        return it.data(Qt.UserRole) if it else None

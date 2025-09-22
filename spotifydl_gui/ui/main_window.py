@@ -654,7 +654,10 @@ class MainWindow(QWidget):
             self._update_sentry_indicator()
 
     def open_history(self):
-        HistoryDialog(self, self._load_history()).exec()
+        dlg = HistoryDialog(self, self._load_history())
+        dlg.sig_requeue.connect(lambda urls: self._add_urls(urls, dedupe_history=False))
+        dlg.exec()
+
 
     # --------------- Clipboard watcher ---------------
     def _tick_clipboard(self):
