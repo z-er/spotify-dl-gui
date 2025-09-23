@@ -29,8 +29,9 @@ import platform
 import subprocess
 from pathlib import Path
 from typing import List
+from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, QTime, QUrl
+from PySide6.QtCore import Qt, QTimer, QTime, QUrl, Slot, Signal
 from PySide6.QtGui import QAction, QIcon, QDesktopServices, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 from ..settings_store import get_settings, KEYS, APP_NAME, APP_VER
 from ..runner import Runner, RunOptions, SPOTIFY_URL_RE
 from ..utils import get_app_icon, console_hwnd_for_pid, show_window, resolve_spotifydl_binary
+from ..web_server import WebQueueServer
 from .queue_row import QueueRow, QStatus
 from .settings_dialog import SettingsDialog
 from .history_dialog import HistoryDialog
@@ -52,6 +54,7 @@ PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})%(?!\d)")
 
 
 class MainWindow(QWidget):
+    sig_web_enqueue = Signal(list, str)
     def __init__(self, app_icon: QIcon | None = None):
         super().__init__()
         self.s = get_settings()
@@ -267,6 +270,9 @@ class MainWindow(QWidget):
         self.runner.sig_command_line.connect(self._on_command_line)
         self.runner.sig_parallel_changed.connect(self._on_parallel_changed)
         self.runner.sig_rate_limit_notice.connect(self._on_rate_limit_notice)
+        self.sig_web_enqueue.connect(self.handle_web_submission)
+
+        self._configure_web_server()
 
         # ---- Clipboard watcher ----
         self._last_clip = ""
@@ -287,6 +293,9 @@ class MainWindow(QWidget):
         self._load_form()
         self._update_bin_pill()
         self._update_sentry_indicator()
+        self._web_server: WebQueueServer | None = None
+        self._web_clear_urls: set[str] = set()
+        self._last_run_summary = "Never"
         # Restore previous queue, if any
         try:
             self._restore_queue_state()
@@ -385,6 +394,66 @@ class MainWindow(QWidget):
         else:
             self._sentry_label.setText('Sentry: OFF')
 
+    def _configure_web_server(self):
+        self._stop_web_server()
+        if not self._read_bool(KEYS.get('web_enabled', 'web_enabled'), False):
+            return
+        host = (self.s.value(KEYS.get('web_host', 'web_host'), '127.0.0.1') or '127.0.0.1').strip()
+        try:
+            port = int(self.s.value(KEYS.get('web_port', 'web_port'), 9753))
+        except Exception:
+            port = 9753
+        username = (self.s.value(KEYS.get('web_username', 'web_username'), '') or '').strip()
+        password = (self.s.value(KEYS.get('web_password', 'web_password'), '') or '')
+        dest_override = (self.s.value(KEYS.get('web_dest_override', 'web_dest_override'), '') or '').strip()
+        server = WebQueueServer(self, host, port, username, password, dest_override)
+        ok, msg = server.start()
+        if ok:
+            self._web_server = server
+            self._notify('Web server', msg, 3500)
+        else:
+            self._notify('Web server', f'Failed to start: {msg}', 6000)
+
+    def _stop_web_server(self):
+        if getattr(self, '_web_server', None):
+            try:
+                self._web_server.stop()
+            except Exception:
+                pass
+            self._web_server = None
+
+    @Slot(str, str)
+    def queue_from_web(self, urls_json: str, dest_override: str) -> None:
+        try:
+            urls = json.loads(urls_json)
+        except Exception:
+            urls = []
+        self.handle_web_submission(list(urls), dest_override)
+
+    def handle_web_submission(self, urls: list[str], dest_override: str) -> None:
+        valid = [u for u in urls if SPOTIFY_URL_RE.match(u)]
+        if not valid:
+            return
+        if dest_override:
+            try:
+                Path(dest_override).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            self.dest.setText(dest_override)
+        self._add_urls(valid, dedupe_history=False)
+        self._web_clear_urls.update(valid)
+        self._save_form()
+        self._save_queue_state()
+        if not self.runner.is_running():
+            self._run()
+
+    def get_web_status(self) -> dict:
+        return {
+            'queue_size': self.queue.count(),
+            'is_running': self.runner.is_running(),
+            'last_run': self._last_run_summary,
+        }
+
     def _quit(self):
         # If a run is in progress, confirm stopping
         if self.runner.is_running():
@@ -401,6 +470,7 @@ class MainWindow(QWidget):
             except Exception:
                 pass
         self._really_quit = True
+        self._stop_web_server()
         self.close()  # will be accepted by closeEvent
 
 
@@ -450,6 +520,17 @@ class MainWindow(QWidget):
         for i in reversed(self._selected_rows()):
             self.queue.takeItem(i)
         self._save_queue_state()
+
+    def _remove_urls_from_queue(self, urls: set[str]) -> None:
+        if not urls:
+            return
+        removed = False
+        for i in reversed(range(self.queue.count())):
+            if self._row(i).url() in urls:
+                self.queue.takeItem(i)
+                removed = True
+        if removed:
+            self._save_queue_state()
 
     def _nudge(self, delta: int):
         idxs = self._selected_rows()
@@ -648,6 +729,10 @@ class MainWindow(QWidget):
         self._save_queue_state()
         self._taskbar_reset()
         self.backoff_label.clear()
+        if self._web_clear_urls:
+            self._remove_urls_from_queue(self._web_clear_urls)
+            self._web_clear_urls.clear()
+        self._last_run_summary = datetime.now().strftime("%Y-%m-%d %H:%M")
         if self.tray:
             self.tray.setToolTip("Idle")
 
@@ -721,30 +806,47 @@ class MainWindow(QWidget):
         self._update_tray_tooltip(pct)
 
     def _on_job_finished(self, idx: int, summary):
+        url = summary.url
+        success = int(summary.code) == 0
         if 0 <= idx < self.queue.count():
-            self._row(idx).set_status(QStatus.OK if int(summary.code) == 0 else QStatus.FAIL)
+            self._row(idx).set_status(QStatus.OK if success else QStatus.FAIL)
+        remove_after = getattr(self.runner, "_sentry_enabled", False) or url in self._web_clear_urls
+        if success and remove_after:
+            self._remove_urls_from_queue({url})
+            self._web_clear_urls.discard(url)
+        elif not success:
+            self._web_clear_urls.discard(url)
         self._append_history(summary)
         self._save_queue_state()
 
         sus = len(summary.suspects or [])
-        body = f"{'OK' if int(summary.code) == 0 else 'Failed'} — files: {len(summary.outputs)}"
-        if sus: body += f"; suspects: {sus}"
+        body = f"{'OK' if success else 'Failed'} files: {len(summary.outputs)}"
+        if sus:
+            body += f"; suspects: {sus}"
         if summary.log_path:
-            body += f"\nLog: {Path(summary.log_path).name}"
-        self._notify("Download finished", body, 6000)
+            body += f"Log: {Path(summary.log_path).name}"
+        self._notify('Download finished', body, 6000)
+        self.time_label.setText('')
+        self._update_taskbar_progress(0 if not success else 100)
+        self._update_tray_tooltip(100)
         # reset job timer label
-        self.time_label.setText("")
-        self._update_taskbar_progress(0 if int(summary.code) != 0 else 100)
+        self.time_label.setText('')
+        self._update_taskbar_progress(0 if not success else 100)
         self._update_tray_tooltip(100)
 
     def _on_queue_finished(self, totals):
         self._set_running(False)
         self.tail.setVisible(False)
         self._notify("Queue complete",
-                     f"OK: {totals.ok}  •  Fail: {totals.fail}  •  Suspects: {totals.suspect}",
+                     f'OK: {totals.ok} | Fail: {totals.fail} | Suspects: {totals.suspect}',
                      7000)
         self._taskbar_reset()
         self.backoff_label.clear()
+        if self._web_clear_urls:
+            self._remove_urls_from_queue(self._web_clear_urls)
+            self._web_clear_urls.clear()
+        if getattr(self.runner, '_sentry_enabled', False):
+            self._remove_urls_from_queue({self._row(i).url() for i in range(self.queue.count()) if self._row(i).status() == QStatus.OK})
         if self.tray:
             self.tray.setToolTip("Idle")
         if totals.ok > 0 and self._read_bool(KEYS["open_when_done"], False):
@@ -831,6 +933,7 @@ class MainWindow(QWidget):
 
     def _clear_queue(self):
         self.queue.clear()
+        self._web_clear_urls.clear()
         self._save_queue_state()
 
     def _retry_failed(self):
@@ -909,6 +1012,7 @@ class MainWindow(QWidget):
             except Exception:
                 self._sentry_gap_sec = 25
             self._update_sentry_indicator()
+            self._configure_web_server()
 
     def open_history(self):
         dlg = HistoryDialog(self, self._load_history())
@@ -1065,6 +1169,7 @@ class MainWindow(QWidget):
             self.hide()
             self._notify("Still running in tray", "Downloads continue in the background.", 3500)
         else:
+            self._stop_web_server()
             event.accept()
 
     @staticmethod

@@ -46,6 +46,12 @@ KEYS = {
     "failure_delay_ms": "failure_delay_ms",
     "failure_delay_multiplier": "failure_delay_multiplier",
     "failure_delay_max_ms": "failure_delay_max_ms",
+    "web_enabled": "web_enabled",
+    "web_host": "web_host",
+    "web_port": "web_port",
+    "web_username": "web_username",
+    "web_password": "web_password",
+    "web_dest_override": "web_dest_override",
 
 }
 

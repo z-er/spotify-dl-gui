@@ -79,6 +79,9 @@ You are responsible for how you use this software.
   - Since v0.7: Global keyboard shortcuts (press F1 for a full list).
   - Since v0.7: "Open in Spotify" from queue/history.
 
+- Remote Control
+  - Optional lightweight web server with configurable host/port/auth to submit Spotify links remotely (ideal for media servers).
+
 ---
 
 ## Screenshots
@@ -90,6 +93,7 @@ TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 ## What’s New in v0.8
 
 - Forward spotify-dl JSON events for realtime progress, retry, and rate-limit feedback.
+- Optional remote web server to queue Spotify links from other devices (with auth & media-folder override).
 - Queue persistence, Retry failed, and Remove completed actions.
 - Keyboard shortcuts with a Shortcuts dialog (press F1).
 - Binary pill now shows the installed `spotify-dl` version.
