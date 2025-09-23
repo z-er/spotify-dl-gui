@@ -9,8 +9,28 @@ Easily download your Spotify playlists, albums, and tracks with one click, organ
 
 > [!CAUTION]
 > This app is best used with my own version of [spotify-dl](https://github.com/z-er/spotify-dl), which has been updated to include more functionality.
+> **I've been made aware the app is flagged by Windows Security- this is a false-positive, a result of using python packaging. You can see the code!**
 
 Current version: **v0.8** as of 22/09/2025
+
+---
+
+## Getting Started
+
+### Prerequisites
+- Python 3.10+ (tested with 3.11)
+- [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or [use provided binary](https://github.com/z-er/spotify-dl))
+- Spotify Premium account (required by spotify-dl)
+
+### Install
+> [!IMPORTANT]
+> Grab the latest release [here!](https://github.com/z-er/spotify-dl-gui/releases)
+
+## Disclaimer
+
+This tool is a community-built GUI for [spotify-dl](https://github.com/GuillemCastro/spotify-dl).
+Use responsibly — downloading Spotify content may violate Spotify's Terms of Service and/or local copyright laws.
+You are responsible for how you use this software.
 
 ---
 
@@ -67,28 +87,6 @@ TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 
 ---
 
-## Getting Started
-
-### Prerequisites
-- Python 3.10+ (tested with 3.11)
-- [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or [use provided binary](https://github.com/z-er/spotify-dl))
-- Spotify Premium account (required by spotify-dl)
-
-### Packaging (Windows)
-1. Place your updated `spotify-dl.exe` (from the fork with JSON events) in the project root.
-2. Run `pyinstaller spotify-dl-gui.spec` — the spec bundles the GUI, icon, README, and the CLI binary if it exists.
-3. Grab the distributable from `dist/spotify-dl-gui/`.
-4. Test the build on a clean machine; signing the EXE is recommended for sharing.
-
-## Disclaimer
-
-This tool is a community-built GUI for [spotify-dl](https://github.com/GuillemCastro/spotify-dl).
-Use responsibly — downloading Spotify content may violate Spotify's Terms of Service and/or local copyright laws.
-You are responsible for how you use this software.
-
----
-
-
 ## What’s New in v0.8
 
 - Forward spotify-dl JSON events for realtime progress, retry, and rate-limit feedback.
@@ -110,4 +108,3 @@ Pull requests welcome! If you have ideas for features, open an issue or PR.
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
-
