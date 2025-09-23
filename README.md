@@ -74,6 +74,12 @@ TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 - [spotify-dl](https://github.com/GuillemCastro/spotify-dl) installed (`cargo install spotify-dl` or [use provided binary](https://github.com/z-er/spotify-dl))
 - Spotify Premium account (required by spotify-dl)
 
+### Packaging (Windows)
+1. Place your updated `spotify-dl.exe` (from the fork with JSON events) in the project root.
+2. Run `pyinstaller spotify-dl-gui.spec` — the spec bundles the GUI, icon, README, and the CLI binary if it exists.
+3. Grab the distributable from `dist/spotify-dl-gui/`.
+4. Test the build on a clean machine; signing the EXE is recommended for sharing.
+
 ## Disclaimer
 
 This tool is a community-built GUI for [spotify-dl](https://github.com/GuillemCastro/spotify-dl).
