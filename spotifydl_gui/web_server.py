@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Iterable
 from urllib.parse import parse_qs
 
-
+from PySide6.QtCore import Qt, QMetaObject, Q_ARG
 
 from .runner import SPOTIFY_URL_RE
 
@@ -127,8 +127,8 @@ class WebQueueServer:
                 if not urls:
                     self._respond_form(message="No valid Spotify URLs supplied.", success=False)
                     return
-                ok, msg = parent.enqueue(urls, dest)
-                display_links = '' if ok else '\n'.join(urls)
+                ok, msg, remaining = parent.enqueue(urls, dest)
+                display_links = '' if ok else '\n'.join(remaining or urls)
                 self._respond_form(
                     message=msg,
                     success=ok,
@@ -170,13 +170,47 @@ class WebQueueServer:
             self._server = None
 
     # ------------------------------------------------------------------
-    def enqueue(self, urls: Iterable[str], dest: str | None) -> tuple[bool, str]:
+    def enqueue(self, urls: Iterable[str], dest: str | None) -> tuple[bool, str, list[str]]:
         urls = [u for u in urls if SPOTIFY_URL_RE.match(u)]
         if not urls:
-            return False, "No valid Spotify URLs supplied."
-
-        self._main_window.sig_web_enqueue.emit(list(urls), dest or "")
-        return True, f"Queued {len(urls)} link(s)."
+            return False, "No valid Spotify URLs supplied.", []
+        payload = json.dumps(list(urls))
+        target_dest = dest or ""
+        try:
+            result = QMetaObject.invokeMethod(
+                self._main_window,
+                "queue_from_web",
+                Qt.BlockingQueuedConnection,
+                Q_ARG(str, payload),
+                Q_ARG(str, target_dest),
+            )
+        except Exception:
+            self._main_window.sig_web_enqueue.emit(list(urls), target_dest)
+            return True, f"Queued {len(urls)} link(s).", []
+        success = False
+        message = ""
+        remaining: list[str] = []
+        if isinstance(result, tuple):
+            if len(result) >= 3:
+                success = bool(result[0])
+                message = str(result[1])
+                payload_links = result[2]
+                if isinstance(payload_links, list):
+                    remaining = [str(u) for u in payload_links]
+                elif isinstance(payload_links, str) and payload_links:
+                    remaining = [payload_links]
+            elif len(result) >= 2:
+                success = bool(result[0])
+                message = str(result[1])
+        elif isinstance(result, bool):
+            success = result
+        if not message:
+            message = f"Queued {len(urls)} link(s)." if success else "Unable to queue links."
+        if not success and not remaining:
+            remaining = list(urls)
+        if success:
+            remaining = []
+        return success, message, remaining
 
     def _collect_status(self) -> dict:
         return self._main_window.get_web_status()

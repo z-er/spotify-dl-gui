@@ -19,6 +19,7 @@ Features:
 
 from __future__ import annotations
 
+from enum import Enum
 import os
 import sys
 import re
@@ -50,6 +51,16 @@ from .shortcuts_dialog import ShortcutsDialog
 
 
 CLIPBOARD_POLL_MS = 1000
+
+class QueueSource(str, Enum):
+    MANUAL = "manual"
+    WEB = "web"
+    SENTRY = "sentry"
+
+
+QUEUE_META_ROLE = Qt.UserRole
+AUTO_REMOVE_SOURCES = {QueueSource.WEB.value, QueueSource.SENTRY.value}
+
 PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})%(?!\d)")
 
 
@@ -272,8 +283,6 @@ class MainWindow(QWidget):
         self.runner.sig_rate_limit_notice.connect(self._on_rate_limit_notice)
         self.sig_web_enqueue.connect(self.handle_web_submission)
 
-        self._configure_web_server()
-
         # ---- Clipboard watcher ----
         self._last_clip = ""
         self._clip_timer = QTimer(self); self._clip_timer.setInterval(CLIPBOARD_POLL_MS)
@@ -294,13 +303,16 @@ class MainWindow(QWidget):
         self._update_bin_pill()
         self._update_sentry_indicator()
         self._web_server: WebQueueServer | None = None
-        self._web_clear_urls: set[str] = set()
         self._last_run_summary = "Never"
+        self._queue_counter = 0
+        self._active_jobs: dict[int, dict] = {}
+        self._runner_job_map: dict[int, int] = {}
         # Restore previous queue, if any
         try:
             self._restore_queue_state()
         except Exception:
             pass
+        self._configure_web_server()
         # Install global keyboard shortcuts
         self._install_shortcuts()
         # Runtime tracking for progress/ETA and Windows taskbar
@@ -321,6 +333,21 @@ class MainWindow(QWidget):
     def _notify(self, title: str, body: str, ms: int = 4000):
         if self.tray:
             self.tray.showMessage(title, body, QSystemTrayIcon.Information, ms)
+
+    def _next_job_id(self) -> int:
+        job_id = self._queue_counter
+        self._queue_counter += 1
+        return job_id
+
+    def _item_meta(self, item) -> dict:
+        meta = item.data(QUEUE_META_ROLE) if item else None
+        if not isinstance(meta, dict):
+            meta = {}
+        return meta
+
+    def _set_item_meta(self, item, meta: dict) -> None:
+        if item:
+            item.setData(QUEUE_META_ROLE, dict(meta))
 
     def _read_bool(self, key: str, default: bool) -> bool:
         return str(self.s.value(key, "true" if default else "false")).lower() == "true"
@@ -422,30 +449,40 @@ class MainWindow(QWidget):
                 pass
             self._web_server = None
 
-    @Slot(str, str)
-    def queue_from_web(self, urls_json: str, dest_override: str) -> None:
+    @Slot(str, str, result=object)
+    def queue_from_web(self, urls_json: str, dest_override: str):
         try:
             urls = json.loads(urls_json)
         except Exception:
             urls = []
-        self.handle_web_submission(list(urls), dest_override)
+        if not isinstance(urls, list):
+            urls = []
+        normalized = [str(u) for u in urls]
+        return self.handle_web_submission(normalized, dest_override, source=QueueSource.WEB)
 
-    def handle_web_submission(self, urls: list[str], dest_override: str) -> None:
+    def handle_web_submission(
+        self,
+        urls: list[str],
+        dest_override: str,
+        source: QueueSource | str | None = None,
+    ) -> tuple[bool, str, list[str]]:
         valid = [u for u in urls if SPOTIFY_URL_RE.match(u)]
         if not valid:
-            return
+            return False, "No valid Spotify URLs supplied.", list(urls)
         if dest_override:
             try:
                 Path(dest_override).mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
             self.dest.setText(dest_override)
-        self._add_urls(valid, dedupe_history=False)
-        self._web_clear_urls.update(valid)
+        assigned_source = source or QueueSource.WEB
+        job_ids = self._add_urls(valid, dedupe_history=False, source=assigned_source)
+        if not job_ids:
+            return False, "Nothing new to queue.", valid
         self._save_form()
-        self._save_queue_state()
         if not self.runner.is_running():
             self._run()
+        return True, f"Queued {len(job_ids)} link(s).", []
 
     def get_web_status(self) -> dict:
         return {
@@ -475,9 +512,9 @@ class MainWindow(QWidget):
 
 
     # --------------- Queue ops ---------------
-    def _add_urls(self, urls: List[str], dedupe_history: bool = False):
+    def _add_urls(self, urls: List[str], dedupe_history: bool = False, source: QueueSource | str = QueueSource.MANUAL) -> list[int]:
+        source_value = source.value if isinstance(source, QueueSource) else str(source)
         existing = {self._row(i).url() for i in range(self.queue.count())}
-        # history set (successful jobs only)
         hist_inputs = set()
         if dedupe_history:
             try:
@@ -486,7 +523,7 @@ class MainWindow(QWidget):
                         hist_inputs.add(h["input"])
             except Exception:
                 pass
-        added = 0
+        added_ids: list[int] = []
         for u in urls:
             if not SPOTIFY_URL_RE.match(u):
                 continue
@@ -499,10 +536,14 @@ class MainWindow(QWidget):
             item.setSizeHint(roww.sizeHint())
             self.queue.addItem(item)
             self.queue.setItemWidget(item, roww)
-            existing.add(u); added += 1
-        if added:
-            self._notify("Queued links", f"Added {added} link(s).", 2500)
+            job_id = self._next_job_id()
+            self._set_item_meta(item, {"id": job_id, "source": source_value, "url": u, "completed": False, "completed_ok": None})
+            existing.add(u)
+            added_ids.append(job_id)
+        if added_ids:
+            self._notify("Queued links", f"Added {len(added_ids)} link(s).", 2500)
             self._save_queue_state()
+        return added_ids
 
     def _add_from_staging(self):
         urls = [ln.strip() for ln in self.staging.toPlainText().splitlines() if ln.strip()]
@@ -529,6 +570,67 @@ class MainWindow(QWidget):
             if self._row(i).url() in urls:
                 self.queue.takeItem(i)
                 removed = True
+        if removed:
+            self._save_queue_state()
+
+    def _remove_row_by_job(self, job_id: int | None, fallback_url: str) -> None:
+        removed = False
+        found_job_id = job_id
+        if job_id is not None:
+            for idx in reversed(range(self.queue.count())):
+                item = self.queue.item(idx)
+                meta = self._item_meta(item)
+                if meta.get("id") == job_id:
+                    self.queue.takeItem(idx)
+                    removed = True
+                    break
+        if not removed and fallback_url:
+            for idx in reversed(range(self.queue.count())):
+                if self._row(idx).url() == fallback_url:
+                    item = self.queue.item(idx)
+                    meta = self._item_meta(item)
+                    found_job_id = meta.get("id")
+                    self.queue.takeItem(idx)
+                    removed = True
+                    break
+        if removed:
+            if found_job_id is not None:
+                try:
+                    key = int(found_job_id)
+                except Exception:
+                    key = found_job_id
+                self._active_jobs.pop(key, None)
+                for idx_key, mapped_id in list(self._runner_job_map.items()):
+                    if mapped_id == key:
+                        self._runner_job_map.pop(idx_key, None)
+            self._save_queue_state()
+
+    def _remove_completed_auto_rows(self) -> None:
+        removed = False
+        for idx in reversed(range(self.queue.count())):
+            item = self.queue.item(idx)
+            meta = self._item_meta(item)
+            source_value = str(meta.get("source", QueueSource.MANUAL.value))
+            if source_value not in AUTO_REMOVE_SOURCES:
+                continue
+            if not meta.get("completed") or meta.get("completed_ok") is not True:
+                continue
+            job_id = meta.get("id")
+            try:
+                key = int(job_id) if job_id is not None else None
+            except Exception:
+                key = job_id
+            if key is not None and key in self._active_jobs:
+                continue
+            if key is not None and any(mapped_id == key for mapped_id in self._runner_job_map.values()):
+                continue
+            self.queue.takeItem(idx)
+            removed = True
+            if key is not None:
+                self._active_jobs.pop(key, None)
+                for idx_key, mapped_id in list(self._runner_job_map.items()):
+                    if mapped_id == key:
+                        self._runner_job_map.pop(idx_key, None)
         if removed:
             self._save_queue_state()
 
@@ -718,6 +820,8 @@ class MainWindow(QWidget):
 
     def _stop(self):
         self.runner.stop()
+        self._active_jobs.clear()
+        self._runner_job_map.clear()
         self._set_running(False)
         self.backoff_label.clear()
         # reset running statuses
@@ -729,10 +833,6 @@ class MainWindow(QWidget):
         self._save_queue_state()
         self._taskbar_reset()
         self.backoff_label.clear()
-        if self._web_clear_urls:
-            self._remove_urls_from_queue(self._web_clear_urls)
-            self._web_clear_urls.clear()
-        self._last_run_summary = datetime.now().strftime("%Y-%m-%d %H:%M")
         if self.tray:
             self.tray.setToolTip("Idle")
 
@@ -760,13 +860,30 @@ class MainWindow(QWidget):
 
     # --------------- Runner signal handlers ---------------
     def _on_job_started(self, idx: int, total: int, url: str):
-        if 0 <= idx < self.queue.count():
+        item = self.queue.item(idx) if 0 <= idx < self.queue.count() else None
+        meta = self._item_meta(item) if item else {}
+        if item:
             row = self._row(idx)
-            row.set_status(QStatus.RUNNING); row.set_progress(0)
+            row.set_status(QStatus.RUNNING)
+            row.set_progress(0)
             self.queue.setCurrentRow(idx)
-        self.tail.clear(); self.tail.setVisible(True)
+        job_id = int(meta["id"]) if "id" in meta else self._next_job_id()
+        started_ts = time.time()
+        meta["id"] = job_id
+        meta.setdefault("source", QueueSource.MANUAL.value)
+        meta.setdefault("url", url)
+        meta["completed"] = False
+        meta["completed_ok"] = None
+        meta["completed_at"] = None
+        meta["started_at"] = started_ts
+        if item:
+            self._set_item_meta(item, meta)
+        self._active_jobs[job_id] = dict(meta)
+        self._runner_job_map[idx] = job_id
+        self.tail.clear()
+        self.tail.setVisible(True)
         self._notify("Starting", f"Job {idx+1}/{total}")
-        self._current_job_started_ts = time.time()
+        self._current_job_started_ts = started_ts
         self._current_job_total = total
         self._current_job_index = idx
         self._update_taskbar_progress(0)
@@ -808,14 +925,41 @@ class MainWindow(QWidget):
     def _on_job_finished(self, idx: int, summary):
         url = summary.url
         success = int(summary.code) == 0
-        if 0 <= idx < self.queue.count():
-            self._row(idx).set_status(QStatus.OK if success else QStatus.FAIL)
-        remove_after = getattr(self.runner, "_sentry_enabled", False) or url in self._web_clear_urls
-        if success and remove_after:
-            self._remove_urls_from_queue({url})
-            self._web_clear_urls.discard(url)
-        elif not success:
-            self._web_clear_urls.discard(url)
+        job_id = self._runner_job_map.pop(idx, None)
+        item = self.queue.item(idx) if 0 <= idx < self.queue.count() else None
+        item_meta = self._item_meta(item) if item else {}
+        meta: dict = {}
+        if job_id is not None:
+            active_meta = self._active_jobs.pop(job_id, None)
+            if active_meta:
+                meta.update(active_meta)
+        if not meta and item_meta:
+            meta.update(item_meta)
+        if not meta:
+            meta = {"source": QueueSource.MANUAL.value}
+        if job_id is None and "id" in meta:
+            try:
+                job_id = int(meta["id"])
+            except Exception:
+                job_id = meta["id"]
+        if isinstance(job_id, str):
+            try:
+                job_id = int(job_id)
+            except Exception:
+                pass
+        meta.setdefault("source", QueueSource.MANUAL.value)
+        meta.setdefault("url", url)
+        meta["id"] = job_id
+        meta["completed"] = True
+        meta["completed_ok"] = success
+        meta["completed_at"] = time.time()
+        if item:
+            row = self._row(idx)
+            row.set_status(QStatus.OK if success else QStatus.FAIL)
+            self._set_item_meta(item, meta)
+        remove_after = bool(success and str(meta.get("source")) in AUTO_REMOVE_SOURCES)
+        if remove_after:
+            self._remove_row_by_job(job_id if isinstance(job_id, int) else None, url)
         self._append_history(summary)
         self._save_queue_state()
 
@@ -824,12 +968,8 @@ class MainWindow(QWidget):
         if sus:
             body += f"; suspects: {sus}"
         if summary.log_path:
-            body += f"Log: {Path(summary.log_path).name}"
+            body += f"\nLog: {Path(summary.log_path).name}"
         self._notify('Download finished', body, 6000)
-        self.time_label.setText('')
-        self._update_taskbar_progress(0 if not success else 100)
-        self._update_tray_tooltip(100)
-        # reset job timer label
         self.time_label.setText('')
         self._update_taskbar_progress(0 if not success else 100)
         self._update_tray_tooltip(100)
@@ -842,11 +982,10 @@ class MainWindow(QWidget):
                      7000)
         self._taskbar_reset()
         self.backoff_label.clear()
-        if self._web_clear_urls:
-            self._remove_urls_from_queue(self._web_clear_urls)
-            self._web_clear_urls.clear()
-        if getattr(self.runner, '_sentry_enabled', False):
-            self._remove_urls_from_queue({self._row(i).url() for i in range(self.queue.count()) if self._row(i).status() == QStatus.OK})
+        self._runner_job_map.clear()
+        self._remove_completed_auto_rows()
+        self._active_jobs.clear()
+        self._last_run_summary = datetime.now().strftime("%Y-%m-%d %H:%M")
         if self.tray:
             self.tray.setToolTip("Idle")
         if totals.ok > 0 and self._read_bool(KEYS["open_when_done"], False):
@@ -892,14 +1031,21 @@ class MainWindow(QWidget):
         try:
             items = []
             for i in range(self.queue.count()):
+                item = self.queue.item(i)
                 row = self._row(i)
+                meta = self._item_meta(item)
+                if 'id' not in meta:
+                    meta['id'] = self._next_job_id()
+                    self._set_item_meta(item, meta)
                 st = row.status()
-                # Normalize transient states to PENDING
                 if st in (QStatus.RUNNING, QStatus.PAUSED):
                     st_name = QStatus.PENDING.name
                 else:
                     st_name = st.name
-                items.append({"url": row.url(), "status": st_name})
+                items.append({"url": row.url(),
+                              "status": st_name,
+                              "source": meta.get('source', QueueSource.MANUAL.value),
+                              "id": meta.get('id')})
             self.s.setValue(KEYS.get("queue_state", "queue_state"), json.dumps(items))
         except Exception:
             pass
@@ -914,6 +1060,7 @@ class MainWindow(QWidget):
             return
         if self.queue.count() > 0:
             return  # don't overwrite an existing live queue
+        max_id = self._queue_counter
         for entry in data:
             try:
                 url = (entry.get("url") or "").strip()
@@ -921,6 +1068,13 @@ class MainWindow(QWidget):
                 st = QStatus[st_name] if st_name in QStatus.__members__ else QStatus.PENDING
                 if st in (QStatus.RUNNING, QStatus.PAUSED):
                     st = QStatus.PENDING
+                source_value = entry.get("source", QueueSource.MANUAL.value)
+                job_id = entry.get("id")
+                if job_id is None:
+                    job_id = max_id
+                    max_id += 1
+                else:
+                    max_id = max(max_id, int(job_id) + 1)
                 if not url:
                     continue
                 roww = QueueRow(url, st)
@@ -928,12 +1082,19 @@ class MainWindow(QWidget):
                 item.setSizeHint(roww.sizeHint())
                 self.queue.addItem(item)
                 self.queue.setItemWidget(item, roww)
+                self._set_item_meta(item, {"id": job_id,
+                                           "source": source_value,
+                                           "url": url,
+                                           "completed": False,
+                                           "completed_ok": None})
             except Exception:
                 continue
+        self._queue_counter = max(max_id, self._queue_counter)
 
     def _clear_queue(self):
         self.queue.clear()
-        self._web_clear_urls.clear()
+        self._active_jobs.clear()
+        self._runner_job_map.clear()
         self._save_queue_state()
 
     def _retry_failed(self):
@@ -1037,7 +1198,8 @@ class MainWindow(QWidget):
             return
 
         # If Sentry is ON, de-dupe against successful history
-        self._add_urls(urls, dedupe_history=self._sentry_enabled)
+        source = QueueSource.SENTRY if self._sentry_enabled else QueueSource.MANUAL
+        self._add_urls(urls, dedupe_history=self._sentry_enabled, source=source)
 
         # Auto-run when idle under Sentry
         if self._sentry_enabled and not self.runner.is_running() and self.queue.count() > 0:
