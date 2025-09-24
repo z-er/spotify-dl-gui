@@ -24,25 +24,23 @@ class ThreadedHTTPServer(HTTPServer, threading.Thread):
     def __init__(self, server_address, handler_cls):
         HTTPServer.__init__(self, server_address, handler_cls)
         threading.Thread.__init__(self, daemon=True)
-        self._stop_event = threading.Event()
 
     def run(self) -> None:  # pragma: no cover - thread loop
-        while not self._stop_event.is_set():
-            self.handle_request()
+        try:
+            self.serve_forever(poll_interval=0.2)
+        except Exception:
+            pass
 
     def stop(self) -> None:
-        self._stop_event.set()
         try:
-            import socket
-
-            host, port = self.server_address
-            if host in ('0.0.0.0', '', None):
-                host = '127.0.0.1'
-            with socket.create_connection((host, port), timeout=0.2):
-                pass
+            self.shutdown()
         except Exception:
             pass
         self.join(timeout=2)
+        try:
+            self.server_close()
+        except Exception:
+            pass
 
 
 class WebQueueServer:

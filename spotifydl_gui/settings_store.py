@@ -38,6 +38,7 @@ KEYS = {
     "history": "history",
     "history_max": "history_max",
     "queue_state": "queue_state",
+    "job_queue_state": "job_queue_state",
     "scheduler_enabled": "scheduler_enabled",
     "scheduler_time": "scheduler_time",
     "adaptive_parallel": "adaptive_parallel",

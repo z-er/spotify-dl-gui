@@ -385,6 +385,11 @@ class SettingsDialog(QDialog):
 
         s.setValue(KEYS["bin"], self.bin_edit.text().strip())
 
+        try:
+            s.sync()
+        except Exception:
+            pass
+
         self.accept()
     
         # -------- Organize destination now --------
