@@ -11,7 +11,7 @@ from PySide6.QtCore import QSettings
 # Application metadata
 APP_NAME = "spotify-dl GUI"
 APP_ORG = "JoshTools"
-APP_VER = "v0.8"
+APP_VER = "v0.9.5"
 
 # Common keys (to avoid typos)
 KEYS = {
@@ -38,6 +38,7 @@ KEYS = {
     "history": "history",
     "history_max": "history_max",
     "queue_state": "queue_state",
+    "job_queue_state": "job_queue_state",
     "scheduler_enabled": "scheduler_enabled",
     "scheduler_time": "scheduler_time",
     "adaptive_parallel": "adaptive_parallel",
@@ -46,6 +47,12 @@ KEYS = {
     "failure_delay_ms": "failure_delay_ms",
     "failure_delay_multiplier": "failure_delay_multiplier",
     "failure_delay_max_ms": "failure_delay_max_ms",
+    "web_enabled": "web_enabled",
+    "web_host": "web_host",
+    "web_port": "web_port",
+    "web_username": "web_username",
+    "web_password": "web_password",
+    "web_dest_override": "web_dest_override",
 
 }
 

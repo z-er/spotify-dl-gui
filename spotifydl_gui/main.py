@@ -1,6 +1,6 @@
 # spotifydl_gui/main.py
 """
-spotify-dl GUI — v0.8 (modular)
+spotify-dl GUI — v0.9.5 (modular)
 Entry point: creates the Qt app, applies theme, and shows the main window.
 """
 

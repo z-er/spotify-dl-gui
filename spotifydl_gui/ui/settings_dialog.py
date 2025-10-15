@@ -1,6 +1,6 @@
 # spotifydl_gui/ui/settings_dialog.py
 """
-Settings dialog (v0.8)
+Settings dialog (v0.9.5)
 
 Groups:
 - General (open when done, minimize to tray, persistent terminal)
@@ -99,6 +99,17 @@ class SettingsDialog(QDialog):
         self.sentry_gap_sec = QSpinBox(); self.sentry_gap_sec.setRange(25, 600); self.sentry_gap_sec.setSuffix(" sec")
         self.sentry_hint = QLabel("When enabled, new Spotify links copied to clipboard are added and run automatically with a delay between jobs.")
         self.sentry_hint.setProperty("class", "muted")
+
+        # ---------- Web server ----------
+        self.web_enabled = QCheckBox("Enable web submission server")
+        self.web_host = QLineEdit(); self.web_host.setPlaceholderText("127.0.0.1")
+        self.web_port = QSpinBox(); self.web_port.setRange(1, 65535); self.web_port.setValue(9753)
+        self.web_username = QLineEdit(); self.web_username.setPlaceholderText("Optional username")
+        self.web_password = QLineEdit(); self.web_password.setEchoMode(QLineEdit.Password)
+        self.web_password.setPlaceholderText("Optional password")
+        self.web_dest = QLineEdit(); self.web_dest.setPlaceholderText("Media library destination override")
+        self.web_dest_btn = QPushButton("Browse…")
+        self.web_dest_btn.clicked.connect(self._browse_web_dest)
 
         # ---------- Runner ----------
         self.adaptive_parallel = QCheckBox("Adaptive parallelism (auto-adjust --parallel on failures/successes)")
@@ -199,6 +210,15 @@ class SettingsDialog(QDialog):
         row_s1 = _hbox([self.sentry_enabled])
         row_s2 = _hbox([QLabel("Gap between jobs:"), self.sentry_gap_sec])
         layout.addLayout(row_s1); layout.addLayout(row_s2); layout.addWidget(self.sentry_hint)
+
+        # Web server
+        layout.addWidget(section("Web Server"))
+        layout.addWidget(self.web_enabled)
+        layout.addLayout(_hbox([QLabel("Host"), self.web_host], stretch_last=True))
+        layout.addLayout(_hbox([QLabel("Port"), self.web_port], stretch_last=True))
+        layout.addLayout(_hbox([QLabel("Username"), self.web_username], stretch_last=True))
+        layout.addLayout(_hbox([QLabel("Password"), self.web_password], stretch_last=True))
+        layout.addLayout(_hbox([self.web_dest, self.web_dest_btn], stretch_last=True))
 
         # Binary
         layout.addWidget(section("spotify-dl Binary"))
@@ -302,6 +322,16 @@ class SettingsDialog(QDialog):
         except Exception:
             self.sentry_gap_sec.setValue(25)
 
+        self.web_enabled.setChecked(str(v(KEYS.get("web_enabled", "web_enabled"), "false")).lower() == "true")
+        self.web_host.setText(str(v(KEYS.get("web_host", "web_host"), "127.0.0.1")))
+        try:
+            self.web_port.setValue(int(v(KEYS.get("web_port", "web_port"), 9753)))
+        except Exception:
+            self.web_port.setValue(9753)
+        self.web_username.setText(str(v(KEYS.get("web_username", "web_username"), "")))
+        self.web_password.setText(str(v(KEYS.get("web_password", "web_password"), "")))
+        self.web_dest.setText(str(v(KEYS.get("web_dest_override", "web_dest_override"), "")))
+
         self.scheduler_enabled.setChecked(str(v(KEYS["scheduler_enabled"], "false")).lower() == "true")
         self.scheduler_time.setText(str(v(KEYS["scheduler_time"], "")))
 
@@ -338,6 +368,13 @@ class SettingsDialog(QDialog):
         s.setValue(KEYS["sentry_enabled"], "true" if self.sentry_enabled.isChecked() else "false")
         s.setValue(KEYS["sentry_gap_sec"], str(max(25, self.sentry_gap_sec.value())))
 
+        s.setValue(KEYS.get("web_enabled", "web_enabled"), "true" if self.web_enabled.isChecked() else "false")
+        s.setValue(KEYS.get("web_host", "web_host"), self.web_host.text().strip() or "127.0.0.1")
+        s.setValue(KEYS.get("web_port", "web_port"), str(self.web_port.value()))
+        s.setValue(KEYS.get("web_username", "web_username"), self.web_username.text().strip())
+        s.setValue(KEYS.get("web_password", "web_password"), self.web_password.text())
+        s.setValue(KEYS.get("web_dest_override", "web_dest_override"), self.web_dest.text().strip())
+
         s.setValue(KEYS["adaptive_parallel"], "true" if self.adaptive_parallel.isChecked() else "false")
         s.setValue(KEYS.get("failure_delay_ms", "failure_delay_ms"), str(self.failure_delay_ms.value()))
         s.setValue(KEYS.get("failure_delay_multiplier", "failure_delay_multiplier"), str(self.failure_delay_multiplier.value()))
@@ -347,6 +384,18 @@ class SettingsDialog(QDialog):
         s.setValue(KEYS["scheduler_time"], self.scheduler_time.text().strip())
 
         s.setValue(KEYS["bin"], self.bin_edit.text().strip())
+
+        try:
+            s.sync()
+        except Exception:
+            pass
+
+        parent = self.parent()
+        if parent and hasattr(parent, '_configure_web_server'):
+            try:
+                parent._configure_web_server(force=True)
+            except Exception:
+                pass
 
         self.accept()
     
@@ -401,6 +450,11 @@ class SettingsDialog(QDialog):
 
 
 # ---------- helpers ----------
+    def _browse_web_dest(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select media destination override")
+        if folder:
+            self.web_dest.setText(folder)
+
 def _hbox(widgets: list[QWidget], stretch_last: bool = False):
     row = QHBoxLayout()
     for i, w in enumerate(widgets):
