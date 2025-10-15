@@ -1,6 +1,6 @@
 # spotifydl_gui/ui/settings_dialog.py
 """
-Settings dialog (v0.8)
+Settings dialog (v0.9.5)
 
 Groups:
 - General (open when done, minimize to tray, persistent terminal)
@@ -384,6 +384,18 @@ class SettingsDialog(QDialog):
         s.setValue(KEYS["scheduler_time"], self.scheduler_time.text().strip())
 
         s.setValue(KEYS["bin"], self.bin_edit.text().strip())
+
+        try:
+            s.sync()
+        except Exception:
+            pass
+
+        parent = self.parent()
+        if parent and hasattr(parent, '_configure_web_server'):
+            try:
+                parent._configure_web_server(force=True)
+            except Exception:
+                pass
 
         self.accept()
     

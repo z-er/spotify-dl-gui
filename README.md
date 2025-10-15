@@ -11,7 +11,7 @@ Easily download your Spotify playlists, albums, and tracks with one click, organ
 > This app is best used with my own version of [spotify-dl](https://github.com/z-er/spotify-dl), which has been updated to include more functionality.
 > **I've been made aware the app is flagged by Windows Security- this is a false-positive, a result of using python packaging. You can see the code!**
 
-Current version: **v0.8** as of 22/09/2025
+Current version: **v0.9.5** as of 22/09/2025
 
 ---
 
@@ -90,7 +90,7 @@ TODO: add screenshots (main window, settings, tray menu, sentry indicator)
 
 ---
 
-## What’s New in v0.8
+## What’s New in v0.9.5
 
 - Forward spotify-dl JSON events for realtime progress, retry, and rate-limit feedback.
 - Optional remote web server to queue Spotify links from other devices (with auth & media-folder override).
