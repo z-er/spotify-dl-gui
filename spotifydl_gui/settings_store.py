@@ -11,7 +11,7 @@ from PySide6.QtCore import QSettings
 # Application metadata
 APP_NAME = "spotify-dl GUI"
 APP_ORG = "JoshTools"
-APP_VER = "v0.8"
+APP_VER = "v0.9.5"
 
 # Common keys (to avoid typos)
 KEYS = {

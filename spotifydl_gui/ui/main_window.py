@@ -1006,7 +1006,6 @@ class MainWindow(QWidget):
             except Exception:
                 self._sentry_gap_sec = 25
             self._update_sentry_indicator()
-            self._configure_web_server(force=True)
 
     def open_history(self) -> None:
         dlg = HistoryDialog(self, self._load_history())
