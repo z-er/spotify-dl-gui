@@ -67,6 +67,9 @@ class SettingsDialog(QDialog):
             "duplicate handling, cover extraction, and integrity checks."
         )
         self.btn_organize_now.clicked.connect(self._organize_now)
+        self.btn_cleanup = QPushButton("Clean empty folders")
+        self.btn_cleanup.setToolTip("Remove folders under the destination that no longer contain audio files.")
+        self.btn_cleanup.clicked.connect(self._cleanup_destination)
 
 
         # ---------- Duplicates ----------
@@ -160,7 +163,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.template_edit)
         layout.addWidget(self.template_preview)
         layout.addWidget(self.template_help)
-        layout.addWidget(self.btn_organize_now)  # <-- add here
+        layout.addLayout(_hbox([self.btn_organize_now, self.btn_cleanup], stretch_last=True))
 
 
         # Duplicates
@@ -275,7 +278,7 @@ class SettingsDialog(QDialog):
         self.template_edit.setText(v(KEYS["template"], "{artist}/{album}"))
 
         self.dup_keep_larger.setChecked(str(v(KEYS["dup_resolve"], "true")).lower() == "true")
-        self.dup_delete_smaller.setChecked(str(v(KEYS["dup_delete_smaller"], "false")).lower() == "true")
+        self.dup_delete_smaller.setChecked(str(v(KEYS["dup_delete_smaller"], "true")).lower() == "true")
 
         self.integrity_flag.setChecked(str(v(KEYS["integrity_flag"], "true")).lower() == "true")
         try:
@@ -398,8 +401,49 @@ class SettingsDialog(QDialog):
                 pass
 
         self.accept()
-    
-        # -------- Organize destination now --------
+
+    # -------- Destination helpers --------
+    def _cleanup_destination(self) -> None:
+        dest = str(self.s.value("dest", "") or "").strip()
+        if not dest or not Path(dest).exists():
+            QMessageBox.critical(
+                self,
+                "Destination missing",
+                "Set a valid destination folder on the main screen before cleaning.",
+            )
+            return
+
+        if QMessageBox.question(
+            self,
+            "Clean destination",
+            "Delete empty folders (and leftover cover/info files) inside the destination?\n\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        prog = QProgressDialog("Cleaning…", "Cancel", 0, 0, self)
+        prog.setWindowModality(Qt.ApplicationModal)
+        prog.setMinimumDuration(0)
+        prog.show()
+        QApplication.processEvents()
+
+        try:
+            removed = org.cleanup_empty_folders(dest)
+        except Exception as e:
+            prog.close()
+            QMessageBox.critical(self, "Cleanup failed", str(e))
+            return
+        finally:
+            prog.close()
+
+        QMessageBox.information(
+            self,
+            "Cleanup complete",
+            f"Removed {removed} folder(s).",
+        )
+
+    # -------- Organize destination now --------
     def _organize_now(self):
         dest = str(self.s.value("dest", "") or "").strip()
         if not dest:

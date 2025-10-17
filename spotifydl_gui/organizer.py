@@ -306,7 +306,7 @@ def config_from_settings(settings) -> OrganizerConfig:
         organize_enabled=_b("organize_enabled", True),
         template=(settings.value("template", "{artist}/{album}") or "{artist}/{album}").strip(),
         dup_resolve_keep_larger=_b("dup_resolve", True),
-        dup_delete_smaller=_b("dup_delete_smaller", False),
+        dup_delete_smaller=_b("dup_delete_smaller", True),
         cover_extract=_b("cover_extract", True),
         integrity_flag=_b("integrity_flag", True),
         integrity_min_mb=_f("integrity_min_mb", 1.0),
@@ -552,7 +552,8 @@ def organize_new_files(dest_root: str,
 
     return outputs, suspects, stats
 
-    # --- NEW: full-library reorganization ---------------------------------------
+
+# --- NEW: full-library reorganization & cleanup --------------------------------
 def reorganize_library(dest_root: str, settings) -> tuple[list[dict], list[dict], dict]:
     """
     Reorganize *all* audio files under dest_root using current settings.
@@ -569,7 +570,6 @@ def reorganize_library(dest_root: str, settings) -> tuple[list[dict], list[dict]
     stats: dict[str, int] = {"moved": 0, "replaced": 0, "deleted": 0, "skipped": 0}
 
     if not dest_root or not cfg.organize_enabled:
-        # If organizer disabled, still integrity-check files
         for p_str in sorted(list_audio_files(Path(dest_root))):
             p = Path(p_str)
             try:
@@ -581,9 +581,86 @@ def reorganize_library(dest_root: str, settings) -> tuple[list[dict], list[dict]
         return outputs, suspects, stats
 
     root = Path(dest_root)
-    files = [Path(p) for p in sorted(list_audio_files(root))]
+    files_info: list[dict] = []
 
-    for p in files:
+    for p_str in sorted(list_audio_files(root)):
+        p = Path(p_str)
+        try:
+            tags = read_tags(p)
+        except Exception:
+            tags = {
+                "artist": "",
+                "album": "",
+                "title": p.stem,
+                "ext": p.suffix,
+                "filename": p.name,
+            }
+        subfolder = compute_subfolder_from_template(p, cfg.template)
+        if not subfolder or str(subfolder).strip("/\\") == "":
+            subfolder = Path(sanitize_component(tags.get("album", "")))
+        target_dir = root / subfolder
+        try:
+            size = p.stat().st_size
+        except Exception:
+            size = -1
+        try:
+            in_target = target_dir.resolve() in p.resolve().parents
+        except Exception:
+            in_target = False
+        files_info.append({
+            "path": p,
+            "tags": tags,
+            "target_dir": target_dir,
+            "size": size,
+            "in_target": in_target,
+        })
+
+    # Deduplicate by artist/album/title/ext, keeping the largest (or the one already in target).
+    best_map: dict[tuple, dict] = {}
+    removed_paths: set[Path] = set()
+
+    if cfg.dup_delete_smaller:
+        best_map: dict[tuple, dict] = {}
+        for info in files_info:
+            key = (
+                info["tags"].get("artist", ""),
+                info["tags"].get("album", ""),
+                info["tags"].get("title", ""),
+                info["path"].suffix.lower(),
+            )
+            best = best_map.get(key)
+            if best is None:
+                best_map[key] = info
+                continue
+
+            candidate_size = info["size"]
+            best_size = best["size"]
+
+            if candidate_size > best_size:
+                removed_paths.add(best["path"])
+                best_map[key] = info
+            elif candidate_size < best_size:
+                removed_paths.add(info["path"])
+            else:
+                if info["in_target"] and not best["in_target"]:
+                    removed_paths.add(best["path"])
+                    best_map[key] = info
+                elif best["in_target"] and not info["in_target"]:
+                    removed_paths.add(info["path"])
+                else:
+                    removed_paths.add(info["path"])
+
+        for dup_path in removed_paths:
+            try:
+                dup_path.unlink()
+                stats["deleted"] = stats.get("deleted", 0) + 1
+            except Exception:
+                pass
+
+    for info in files_info:
+        p = info["path"]
+        if p in removed_paths or not p.exists():
+            continue
         try:
             subfolder = compute_subfolder_from_template(p, cfg.template)
             if not subfolder or str(subfolder).strip("/\\") == "":
@@ -591,7 +668,6 @@ def reorganize_library(dest_root: str, settings) -> tuple[list[dict], list[dict]
             album_dir = root / subfolder
 
             try:
-                # If already inside target folder, still do integrity + cover
                 if album_dir.resolve() in p.resolve().parents:
                     tags = read_tags(p)
                     _record_output(outputs, stats, tags, p, "moved")
@@ -605,7 +681,53 @@ def reorganize_library(dest_root: str, settings) -> tuple[list[dict], list[dict]
             target = album_dir / p.name
             _move_or_handle_duplicate(p, target, album_dir, cfg, outputs, suspects, stats)
         except Exception:
-            # Skip on error; keep going
             pass
 
     return outputs, suspects, stats
+
+
+def cleanup_empty_folders(dest_root: str, allowed_exts=None) -> int:
+    """Remove empty directories (or directories containing only non-audio debris) under dest_root.
+
+    Args:
+        dest_root: Root folder to inspect.
+        allowed_exts: Iterable of extensions to keep (defaults to AUDIO_EXTS).
+
+    Returns:
+        Number of directories removed.
+    """
+    root = Path(dest_root or "")
+    if not root.exists() or not root.is_dir():
+        return 0
+
+    exts = set(allowed_exts or AUDIO_EXTS)
+    removed = 0
+
+    for folder in sorted({p.parent for p in root.rglob('*')} | {root}, key=lambda p: len(str(p)), reverse=True):
+        try:
+            if not folder.exists() or not folder.is_dir():
+                continue
+            items = list(folder.iterdir())
+            if not items:
+                folder.rmdir()
+                removed += 1
+                continue
+            skip = False
+            for item in items:
+                if item.is_dir():
+                    skip = True
+                    break
+                if item.suffix.lower() in exts:
+                    skip = True
+                    break
+            if not skip:
+                for item in items:
+                    try:
+                        item.unlink()
+                    except Exception:
+                        pass
+                folder.rmdir()
+                removed += 1
+        except Exception:
+            pass
+    return removed
