@@ -1,6 +1,6 @@
 # spotifydl_gui/ui/settings_dialog.py
 """
-Settings dialog (v0.9.5)
+Settings dialog (v0.9.6)
 
 Groups:
 - General (open when done, minimize to tray, persistent terminal)

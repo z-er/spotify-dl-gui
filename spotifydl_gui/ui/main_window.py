@@ -81,6 +81,7 @@ class MainWindow(QWidget):
         self._last_run_summary = "Never"
         self._update_in_progress = False
         self._update_pending = False
+        self._update_pending_force = False
         self._updater: Optional[SpotifyDlUpdater] = None
 
         self.job_queue = JobQueue(self.s, self)
@@ -900,8 +901,10 @@ class MainWindow(QWidget):
         self._last_run_summary = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         if self._update_pending and not self.job_queue.next_pending_job():
+            force_update = self._update_pending_force
             self._update_pending = False
-            self._maybe_check_binary_update()
+            self._update_pending_force = False
+            self._maybe_check_binary_update(force=force_update)
 
         if not self._queue_paused:
             self._maybe_start_next_job()
@@ -1225,6 +1228,8 @@ class MainWindow(QWidget):
         if self.runner.is_running():
             self._update_pending = True
             if force:
+                self._update_pending_force = True
+            if force:
                 QMessageBox.information(
                     self,
                     "Update deferred",
@@ -1239,6 +1244,7 @@ class MainWindow(QWidget):
 
         self._update_in_progress = True
         self._update_pending = False
+        self._update_pending_force = False
         self._updater = SpotifyDlUpdater(self)
         self._updater.sig_finished.connect(lambda res: self._on_spotifydl_update_finished(res, force))
         self._updater.check_async()
