@@ -40,6 +40,7 @@ from ..job_queue import JobQueue
 from ..job_types import Job, JobItem, JobItemState, JobState, QueueSource
 from ..runner import Runner, RunOptions, SPOTIFY_URL_RE
 from ..settings_store import APP_NAME, APP_VER, KEYS, get_settings
+from ..updater import SpotifyDlUpdater
 from ..utils import console_hwnd_for_pid, get_app_icon, resolve_spotifydl_binary, show_window
 from ..web_server import WebQueueServer
 from .history_dialog import HistoryDialog
@@ -78,6 +79,9 @@ class MainWindow(QWidget):
         self._current_job_started_ts: Optional[float] = None
         self._queue_paused = False
         self._last_run_summary = "Never"
+        self._update_in_progress = False
+        self._update_pending = False
+        self._updater: Optional[SpotifyDlUpdater] = None
 
         self.job_queue = JobQueue(self.s, self)
         self.runner = Runner(self.s, self.job_queue, self)
@@ -104,6 +108,8 @@ class MainWindow(QWidget):
 
         if platform.system() == "Windows" and self._read_bool(KEYS["persistent_terminal"], False):
             self._ensure_persistent_terminal(start_hidden=True)
+        if platform.system() == "Windows":
+            QTimer.singleShot(2000, self._maybe_check_binary_update)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -893,6 +899,10 @@ class MainWindow(QWidget):
 
         self._last_run_summary = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        if self._update_pending and not self.job_queue.next_pending_job():
+            self._update_pending = False
+            self._maybe_check_binary_update()
+
         if not self._queue_paused:
             self._maybe_start_next_job()
 
@@ -1006,6 +1016,8 @@ class MainWindow(QWidget):
             except Exception:
                 self._sentry_gap_sec = 25
             self._update_sentry_indicator()
+            if self._read_bool(KEYS.get("auto_update_bin", "auto_update_bin"), True):
+                self._maybe_check_binary_update()
 
     def open_history(self) -> None:
         dlg = HistoryDialog(self, self._load_history())
@@ -1200,6 +1212,65 @@ class MainWindow(QWidget):
             return txt.splitlines()[0].strip() if txt else None
         except Exception:
             return None
+
+    def _maybe_check_binary_update(self, force: bool = False) -> None:
+        if platform.system() != "Windows":
+            if force:
+                QMessageBox.information(self, "Update", "Automatic updates are only supported on Windows.")
+            return
+        if self._update_in_progress:
+            if force:
+                QMessageBox.information(self, "Update", "An update check is already in progress.")
+            return
+        if self.runner.is_running():
+            self._update_pending = True
+            if force:
+                QMessageBox.information(
+                    self,
+                    "Update deferred",
+                    "A download is in progress. The update will run when the queue is idle.",
+                )
+            return
+        if not force and not self._read_bool(KEYS.get("auto_update_bin", "auto_update_bin"), True):
+            return
+        custom_bin = (self.s.value(KEYS["bin"], "") or "").strip()
+        if custom_bin and not force:
+            return
+
+        self._update_in_progress = True
+        self._update_pending = False
+        self._updater = SpotifyDlUpdater(self)
+        self._updater.sig_finished.connect(lambda res: self._on_spotifydl_update_finished(res, force))
+        self._updater.check_async()
+
+    def _on_spotifydl_update_finished(self, result, force: bool) -> None:
+        self._update_in_progress = False
+        self._updater = None
+        if result.used_managed and result.target_path:
+            try:
+                if Path(result.target_path).exists():
+                    self.s.setValue(KEYS.get("bin_managed", "bin_managed"), result.target_path)
+            except Exception:
+                pass
+
+        if result.status == "updated":
+            latest = result.latest_version or "latest"
+            msg = f"spotify-dl.exe updated to {latest}."
+            if result.used_managed:
+                msg += f"\nInstalled to: {result.target_path}"
+            QMessageBox.information(self, "spotify-dl updated", msg)
+            self._update_bin_pill()
+            return
+
+        if not force:
+            return
+
+        if result.status == "up_to_date":
+            latest = result.latest_version or "latest"
+            QMessageBox.information(self, "No updates", f"spotify-dl.exe is up to date ({latest}).")
+            return
+
+        QMessageBox.warning(self, "Update failed", result.message or "Update failed.")
 
     def _update_sentry_indicator(self) -> None:
         if getattr(self, "_sentry_enabled", False):

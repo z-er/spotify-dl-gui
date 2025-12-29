@@ -136,6 +136,9 @@ class SettingsDialog(QDialog):
         self.bin_edit.setPlaceholderText("Path to spotify-dl (optional; blank = auto-detect)")
         self.btn_bin = QPushButton("Browse…")
         self.btn_bin.clicked.connect(self._pick_bin)
+        self.auto_update_bin = QCheckBox("Auto-update spotify-dl.exe from GitHub releases")
+        self.btn_check_update = QPushButton("Check for updates")
+        self.btn_check_update.clicked.connect(self._check_update_now)
 
         # ---------- Buttons ----------
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -227,6 +230,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(section("spotify-dl Binary"))
         br = _hbox([self.bin_edit, self.btn_bin], stretch_last=True)
         layout.addLayout(br)
+        layout.addWidget(self.auto_update_bin)
+        layout.addWidget(self.btn_check_update)
 
 
         scroll = QScrollArea(self)
@@ -339,6 +344,9 @@ class SettingsDialog(QDialog):
         self.scheduler_time.setText(str(v(KEYS["scheduler_time"], "")))
 
         self.bin_edit.setText(str(v(KEYS["bin"], "")))
+        self.auto_update_bin.setChecked(
+            str(v(KEYS.get("auto_update_bin", "auto_update_bin"), "true")).lower() == "true"
+        )
 
         self._update_preview()
 
@@ -387,6 +395,10 @@ class SettingsDialog(QDialog):
         s.setValue(KEYS["scheduler_time"], self.scheduler_time.text().strip())
 
         s.setValue(KEYS["bin"], self.bin_edit.text().strip())
+        s.setValue(
+            KEYS.get("auto_update_bin", "auto_update_bin"),
+            "true" if self.auto_update_bin.isChecked() else "false",
+        )
 
         try:
             s.sync()
@@ -401,6 +413,16 @@ class SettingsDialog(QDialog):
                 pass
 
         self.accept()
+
+    def _check_update_now(self):
+        parent = self.parent()
+        if parent and hasattr(parent, "_maybe_check_binary_update"):
+            try:
+                parent._maybe_check_binary_update(force=True)
+            except Exception as exc:
+                QMessageBox.critical(self, "Update failed", str(exc))
+        else:
+            QMessageBox.information(self, "Update", "Open this dialog from the main window to check for updates.")
 
     # -------- Destination helpers --------
     def _cleanup_destination(self) -> None:
