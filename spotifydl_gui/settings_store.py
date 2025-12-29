@@ -53,6 +53,8 @@ KEYS = {
     "web_username": "web_username",
     "web_password": "web_password",
     "web_dest_override": "web_dest_override",
+    "auto_update_bin": "auto_update_bin",
+    "bin_managed": "bin_managed",
 
 }
 

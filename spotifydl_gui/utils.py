@@ -46,23 +46,30 @@ def which(cmd: str) -> str | None:
 def resolve_spotifydl_binary(settings) -> str:
     """
     Resolve the spotify-dl executable path according to priority:
-    1) Bundled next to app
-    2) Custom path from settings
-    3) System PATH
+    1) Custom path from settings
+    2) Managed auto-updated binary (if configured)
+    3) Bundled next to app
+    4) System PATH
     Raises RuntimeError if not found.
     """
     base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
-    candidates = ["spotify-dl.exe", "spotify-dl"] if platform.system() == "Windows" else ["spotify-dl"]
-    for name in candidates:
-        p = base_dir / name
-        if p.exists() and p.is_file():
-            return str(p)
-
     custom = (settings.value("bin", "") or "").strip()
     if custom:
         cp = Path(custom)
         if cp.exists() and cp.is_file():
             return str(cp)
+
+    managed = (settings.value("bin_managed", "") or "").strip()
+    if managed:
+        mp = Path(managed)
+        if mp.exists() and mp.is_file():
+            return str(mp)
+
+    candidates = ["spotify-dl.exe", "spotify-dl"] if platform.system() == "Windows" else ["spotify-dl"]
+    for name in candidates:
+        p = base_dir / name
+        if p.exists() and p.is_file():
+            return str(p)
 
     exe = which("spotify-dl") or which("spotify-dl.exe")
     if exe:
