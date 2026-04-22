@@ -199,7 +199,7 @@ class Job:
             label=str(payload.get("label", "Job")),
             source=source,
             items=items,
-            created_at=float(payload.get("created_at" or 0)),
+            created_at=float(payload.get("created_at", 0) or 0),
             started_at=payload.get("started_at"),
             finished_at=payload.get("finished_at"),
             state=state,

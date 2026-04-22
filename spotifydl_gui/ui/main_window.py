@@ -868,8 +868,6 @@ class MainWindow(QWidget):
         item_id = summary.item_id
         job_item = self._find_job_item(job_id, item_id)
         if job_item:
-            job_item.state = JobItemState.SUCCESS if summary.code == 0 else JobItemState.FAILED
-            job_item.progress = 100 if summary.code == 0 else 0
             store = self._job_item_widgets.get(job_id)
             if store and item_id in store:
                 _, row = store[item_id]
@@ -987,14 +985,23 @@ class MainWindow(QWidget):
     def _append_history(self, result) -> None:
         hist = self._load_history()
         job = result.job
+        original_urls = [it.url for it in job.items if getattr(it, "url", "").strip()]
+        first_output = next(
+            (out for item in result.items for out in item.outputs if isinstance(out, dict)),
+            None,
+        )
         entry = {
             "start_iso": result.started_iso,
             "finished_iso": result.finished_iso,
             "code": 0 if result.state == JobState.SUCCESS else 1,
             "dest": RunOptions.from_payload(job.options).dest,
             "log_path": result.items[-1].log_path if result.items else "",
-            "input": job.label,
-            "urls": len(job.items),
+            "input": original_urls[0] if original_urls else "",
+            "inputs": original_urls,
+            "label": job.label,
+            "urls": len(original_urls),
+            "first_artist": (first_output or {}).get("artist", ""),
+            "first_album": (first_output or {}).get("album", ""),
             "moved": result.totals.moved,
             "replaced": result.totals.replaced,
             "deleted": result.totals.deleted,
@@ -1046,7 +1053,17 @@ class MainWindow(QWidget):
         if not urls:
             return
         if getattr(self, "_sentry_enabled", False):
-            hist_inputs = {h.get("input") for h in self._load_history() if int(h.get("code", -1)) == 0}
+            hist_inputs = set()
+            for entry in self._load_history():
+                if int(entry.get("code", -1)) != 0:
+                    continue
+                inputs = entry.get("inputs")
+                if isinstance(inputs, list):
+                    hist_inputs.update(str(u) for u in inputs if str(u).strip())
+                    continue
+                single_input = str(entry.get("input", "")).strip()
+                if single_input:
+                    hist_inputs.add(single_input)
             urls = [u for u in urls if u not in hist_inputs]
             if not urls:
                 return
