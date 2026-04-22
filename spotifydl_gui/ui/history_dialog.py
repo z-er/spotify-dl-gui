@@ -1,4 +1,3 @@
-# spotifydl_gui/ui/history_dialog.py
 """
 History viewer dialog (enhanced).
 
@@ -19,14 +18,24 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QLineEdit, QLabel, QDialogButtonBox, QMessageBox, QComboBox,
-    QFileDialog
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
 )
+
 from ..settings_store import KEYS
 
 
@@ -72,9 +81,10 @@ class HistoryDialog(QDialog):
         self._all = history or []
         self._visible: List[Dict] = list(self._all)
 
-        # ----- Header: title + search + status filter -----
-        title = QLabel("Previous runs"); title.setStyleSheet("font-size: 15px; font-weight: 600;")
-        self.filter_edit = QLineEdit(); self.filter_edit.setPlaceholderText("Search artist, album, URL, or destination…")
+        title = QLabel("Previous runs")
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Search artist, album, URL, label, or destination...")
         self.filter_edit.textChanged.connect(self._apply_filter)
 
         self.status_combo = QComboBox()
@@ -88,15 +98,12 @@ class HistoryDialog(QDialog):
         header.addWidget(self.status_combo)
         header.addWidget(self.filter_edit)
 
-        # ----- Stats bar -----
         self.stats_lbl = QLabel("")
         self.stats_lbl.setProperty("class", "muted")
 
-        # ----- List -----
         self.list = QListWidget()
         self.list.setSelectionMode(QListWidget.ExtendedSelection)
 
-        # ----- Actions -----
         self.btn_open_log = QPushButton("Open log")
         self.btn_open_log.clicked.connect(self.open_log)
         self.btn_reveal_log = QPushButton("Reveal log in folder")
@@ -108,7 +115,7 @@ class HistoryDialog(QDialog):
         self.btn_requeue.setToolTip("Add the original input URL(s) back to the main queue.")
         self.btn_requeue.clicked.connect(self.requeue_selected)
 
-        self.btn_export = QPushButton("Export visible…")
+        self.btn_export = QPushButton("Export visible...")
         self.btn_export.setToolTip("Export the currently visible rows to a JSON file.")
         self.btn_export.clicked.connect(self.export_visible)
 
@@ -131,7 +138,6 @@ class HistoryDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.button(QDialogButtonBox.Close).clicked.connect(self.close)
 
-        # ----- Layout -----
         layout = QVBoxLayout(self)
         layout.addLayout(header)
         layout.addWidget(self.stats_lbl)
@@ -139,10 +145,8 @@ class HistoryDialog(QDialog):
         layout.addLayout(actions)
         layout.addWidget(btns)
 
-        # Bootstrap view
         self._refresh()
 
-    # -------- internal helpers --------
     def _refresh(self):
         self._apply_filter(update_list_only=False)
 
@@ -160,11 +164,14 @@ class HistoryDialog(QDialog):
             artist = job.get("first_artist", "")
             album = job.get("first_album", "")
             url = job.get("input", "")
+            label_name = job.get("label", "")
 
-            status = "OK ✅" if code == 0 else f"Exit {code} ❌"
-            label = f"[{ts}]  {status}  → {dest}"
+            status = "OK" if code == 0 else f"Exit {code}"
+            label = f"[{ts}]  {status}  -> {dest}"
             if artist or album:
-                label += f"   ({artist} – {album})"
+                label += f"   ({artist} - {album})"
+            if label_name:
+                label += f"   [{label_name}]"
             label += f"   (moved:{moved} repl:{replaced} del:{deleted} skip:{skipped}"
             if suspect:
                 label += f" suspect:{suspect}"
@@ -181,14 +188,11 @@ class HistoryDialog(QDialog):
         return [it.data(Qt.UserRole) for it in items] if items else []
 
     def _apply_filter(self, *_args, update_list_only: bool = True) -> None:
-        # Text filter
         t = (self.filter_edit.text() or "").lower().strip()
-        # Status filter
         mode = self.status_combo.currentText()
 
         filtered = []
         for job in self._all:
-            # status logic
             code = int(job.get("code", -1))
             suspect = int(job.get("suspect", 0))
             if mode == "OK" and code != 0:
@@ -199,12 +203,20 @@ class HistoryDialog(QDialog):
                 continue
 
             if not t:
-                filtered.append(job); continue
+                filtered.append(job)
+                continue
 
             fields = [
-                job.get("first_artist", ""), job.get("first_album", ""),
-                job.get("input", ""), job.get("dest", ""), job.get("start_iso", ""),
+                job.get("first_artist", ""),
+                job.get("first_album", ""),
+                job.get("input", ""),
+                job.get("label", ""),
+                job.get("dest", ""),
+                job.get("start_iso", ""),
             ]
+            inputs = job.get("inputs", [])
+            if isinstance(inputs, list):
+                fields.extend(str(u) for u in inputs)
             joined = " ".join(f for f in fields if f).lower()
             if t in joined:
                 filtered.append(job)
@@ -212,19 +224,16 @@ class HistoryDialog(QDialog):
         self._visible = filtered
         self._populate(self._visible)
 
-        # Recompute stats if requested
         if not update_list_only:
             jobs_stats, total_size = self._compute_stats(self._all)
-            ok = jobs_stats["ok"]; fail = jobs_stats["fail"]; sus = jobs_stats["suspects"]
-            if total_size is None:
-                size_text = ""
-            else:
-                size_text = f" • Size: {self._fmt_size(total_size)}"
+            ok = jobs_stats["ok"]
+            fail = jobs_stats["fail"]
+            sus = jobs_stats["suspects"]
+            size_text = "" if total_size is None else f" | Size: {self._fmt_size(total_size)}"
             self.stats_lbl.setText(
-                f"Jobs: {len(self._all)} • OK: {ok} • Fail: {fail} • With suspects: {sus}{size_text}"
+                f"Jobs: {len(self._all)} | OK: {ok} | Fail: {fail} | With suspects: {sus}{size_text}"
             )
 
-    # -------- stats helpers --------
     def _compute_stats(self, jobs: List[Dict]) -> Tuple[Dict[str, int], int | None]:
         ok = fail = sus = 0
         total_size: int | None = 0
@@ -236,13 +245,11 @@ class HistoryDialog(QDialog):
             if int(j.get("suspect", 0)) > 0:
                 sus += 1
 
-            # Try to read output sizes from log JSON
             lp = j.get("log_path", "")
             if not lp or not Path(lp).exists():
                 total_size = None if total_size == 0 else total_size
                 continue
             try:
-                # Read tail of file to find JSON summary (we wrote it after '=== Summary (JSON) ===')
                 txt = Path(lp).read_text(encoding="utf-8", errors="ignore")
                 sep = "\n=== Summary (JSON) ===\n"
                 if sep in txt:
@@ -262,7 +269,6 @@ class HistoryDialog(QDialog):
 
     @staticmethod
     def _fmt_size(n: int) -> str:
-        # bytes -> human
         step = 1024.0
         units = ["B", "KB", "MB", "GB", "TB"]
         s = float(n)
@@ -272,7 +278,6 @@ class HistoryDialog(QDialog):
             s /= step
         return f"{s:.2f} PB"
 
-    # -------- actions --------
     def open_log(self):
         job = self._selected_job_single()
         if not job:
@@ -309,9 +314,14 @@ class HistoryDialog(QDialog):
             return
         urls = []
         for j in jobs:
+            inputs = j.get("inputs", [])
+            if isinstance(inputs, list) and inputs:
+                urls.extend(str(u).strip() for u in inputs if str(u).strip())
+                continue
             u = (j.get("input") or "").strip()
             if u:
                 urls.append(u)
+        urls = list(dict.fromkeys(urls))
         if not urls:
             QMessageBox.information(self, "No URLs", "Selected runs contain no input URLs.")
             return
@@ -332,9 +342,11 @@ class HistoryDialog(QDialog):
 
     def clear_history(self):
         if QMessageBox.question(
-            self, "Clear history",
+            self,
+            "Clear history",
             "This will remove ALL saved history entries.\n\nProceed?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         ) != QMessageBox.Yes:
             return
         try:
@@ -350,7 +362,6 @@ class HistoryDialog(QDialog):
         self.stats_lbl.setText("")
         QMessageBox.information(self, "History cleared", "All history entries have been removed.")
 
-    # -------- list helpers --------
     def _selected_job_single(self) -> Dict | None:
         it = self.list.currentItem()
         return it.data(Qt.UserRole) if it else None

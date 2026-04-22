@@ -197,6 +197,9 @@ class Runner(QObject):
         self._tail_timer = QTimer(self)
         self._tail_timer.setInterval(500)
         self._tail_timer.timeout.connect(self._tail_tick)
+        self._next_item_timer = QTimer(self)
+        self._next_item_timer.setSingleShot(True)
+        self._next_item_timer.timeout.connect(self._start_next_item)
         self._job_temp_log: Optional[str] = None
         self._tail_pos: int = 0
         self._item_started_at: Optional[float] = None
@@ -297,15 +300,22 @@ class Runner(QObject):
 
     def pause_job(self) -> None:
         self._paused = True
+        self._next_item_timer.stop()
 
     def resume_job(self) -> None:
         if not self._paused:
             return
         self._paused = False
         if not self._proc and self._job:
-            if self._pending_delay_sec > 0:
-                QTimer.singleShot(self._pending_delay_sec * 1000, self._start_next_item)
+            remaining_delay_sec = self._pending_delay_sec
+            if self._backoff_until > 0:
+                remaining_delay_sec = max(0, int(self._backoff_until - time.time() + 0.999))
+            if remaining_delay_sec > 0:
+                self._schedule_next_item(remaining_delay_sec)
             else:
+                self._pending_delay_sec = 0
+                self._backoff_until = 0.0
+                self.sig_backoff_updated.emit(0)
                 self._start_next_item()
 
     def pause_toggle(self) -> None:
@@ -379,15 +389,17 @@ class Runner(QObject):
             return
         if self._paused:
             return
+        self._next_item_timer.stop()
         self._pending_delay_sec = max(0, int(delay_sec))
         if delay_sec > 0:
             self._backoff_until = time.time() + delay_sec
             self._tick_backoff_banner()
         else:
+            self._backoff_until = 0.0
             self.sig_backoff_updated.emit(0)
         if not self._proc:
             if self._pending_delay_sec > 0:
-                QTimer.singleShot(self._pending_delay_sec * 1000, self._start_next_item)
+                self._next_item_timer.start(self._pending_delay_sec * 1000)
             else:
                 self._start_next_item()
 
@@ -402,6 +414,10 @@ class Runner(QObject):
             return
         if self._paused:
             return
+        self._next_item_timer.stop()
+        self._pending_delay_sec = 0
+        self._backoff_until = 0.0
+        self.sig_backoff_updated.emit(0)
         if self._job_cancelled:
             self._cancel_pending_items()
             self._finalize_job()
@@ -673,6 +689,7 @@ class Runner(QObject):
         self._schedule_next_item(delay_sec)
 
     def _cleanup_after_item(self) -> None:
+        self._next_item_timer.stop()
         if self._proc:
             try:
                 self._proc.deleteLater()
@@ -682,6 +699,8 @@ class Runner(QObject):
         self._tail_timer.stop()
         self._tail_pos = 0
         self._json_buffer = ""
+        self._pending_delay_sec = 0
+        self._backoff_until = 0.0
         self._pre_run_files = None
         self._item_started_at = None
         self._raw_collector = []

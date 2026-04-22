@@ -10,7 +10,7 @@ __all__ = [
     "main",
 ]
 
-__version__ = "0.9.6"
+__version__ = "0.9.7"
 
 # Re-export the CLI entry for convenience: `python -m spotifydl_gui`
 from .main import main  # noqa: E402
