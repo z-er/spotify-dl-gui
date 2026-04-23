@@ -680,3 +680,147 @@ The next storage implementation should:
 4. Store outputs and flags explicitly.
 5. Keep logs append-only and queryable.
 6. Stop treating the full `AppSnapshot` as the only persisted unit.
+
+## Last-Known-Good Checkpoint
+
+The Rust GUI/service rewrite has a stable checkpoint before deeper downloader integration work.
+
+Checkpoint branch:
+- `rust-rewrite-scaffold`
+
+Checkpoint commit:
+- `08143ef` `Polish Rust GUI and persist theme defaults`
+
+Checkpoint characteristics:
+- real downloads work through the external `spotify-dl` process adapter
+- queue/history/settings/activity UI is usable and visually polished
+- dark mode is the default and persists
+- package validation and real-world CLI validation exist
+- service/runtime recovery coverage is strong
+
+This checkpoint should be treated as the fallback branch while the next architecture is explored.
+
+## Next Architecture: Library Integration Plan
+
+Current process-wrapper integration was the right intermediate step, but it is now the main limit on UX polish and observability.
+
+Reasons to move deeper:
+- collection progress is inferred instead of truly modeled
+- playlist and album naming is incomplete
+- metadata surface is limited to emitted process events
+- pause/cancel/retry semantics are bounded by process control
+- future GUI polish will keep depending on data the process adapter does not expose
+
+The next step is not “rewrite the downloader here”. The next step is to keep `crates/spotifydl-core` as the seam and replace the external CLI process adapter with a richer Rust-library adapter path.
+
+### Integration principles
+
+- Keep GUI and service downloader-agnostic.
+- Keep `spotifydl-core` as the only downloader integration boundary.
+- Do not mix downloader internals into GUI code.
+- Prefer incremental cutover over a flag-day rewrite.
+- Preserve the existing external-process adapter until the library adapter reaches feature parity.
+
+### Proposed phases
+
+#### Phase 0: Upstream discovery
+
+Goal:
+- understand the current `z-er/spotify-dl` crate layout, public entry points, async model, and data structures
+
+Deliverables:
+- short design note describing what can be reused directly
+- list of places where upstream exposes:
+  - collection metadata
+  - item enumeration
+  - per-track lifecycle
+  - retries/backoff/rate-limit events
+  - output/failure information
+
+#### Phase 1: Source strategy
+
+Choose one of these and document the decision:
+- vendor upstream source into a dedicated directory in this repo
+- add upstream as a git subtree
+- add upstream as a workspace dependency from a checked-out sibling path during development
+
+Recommended default:
+- vendor or subtree for deterministic builds and packaging
+
+Non-goal:
+- scattering upstream code changes across app crates
+
+#### Phase 2: Define the library adapter contract
+
+Extend `spotifydl-core` around a richer adapter surface that is library-oriented, not process-oriented.
+
+The adapter should expose:
+- collection identity and label before download begins
+- item enumeration before the first item starts when available
+- aggregate progress that spans the whole album/playlist
+- item-level metadata updates
+- structured retry/backoff/rate-limit state
+- structured outputs and failure reasons
+- cancellation and pause semantics at the downloader-task level
+
+The external process adapter should remain available behind the same trait while parity is being built.
+
+#### Phase 3: Build the first library-backed adapter
+
+Implement a new adapter in `crates/spotifydl-core`, for example:
+- `core::library::LibraryDownloader`
+
+Responsibilities:
+- translate upstream library events/state into backend events
+- preserve object-safe backend use from `spotifydl-service`
+- avoid any GUI/storage concerns
+
+Success criteria:
+- service can switch between `ExternalDownloader` and `LibraryDownloader`
+- fake backend still exists for tests
+
+#### Phase 4: Service cutover
+
+Once the library adapter can enumerate collections and expose aggregate progress:
+- remove collection-progress inference hacks from the service
+- use true downloader metadata for job labels
+- use true collection totals for progress bars
+- simplify error mapping where upstream already exposes structured failure types
+
+This phase should reduce service complexity, not add more special cases.
+
+#### Phase 5: GUI polish on top of richer data
+
+After the library adapter is feeding better metadata:
+- show real playlist names
+- show real album titles/artists consistently
+- use true aggregate progress rather than smoothed inference alone
+- surface better “now downloading” and retry state
+
+This is where the GUI can stop compensating for missing downloader context.
+
+#### Phase 6: Cutover decision
+
+When the library adapter is stable:
+- decide whether the process adapter remains as fallback/debug mode
+- or whether it becomes legacy and is removed later
+
+Recommended:
+- keep process adapter temporarily as fallback until release confidence is high
+
+### Immediate branch goal
+
+Branch:
+- `rust-library-integration-plan`
+
+Immediate work on this branch should be:
+1. inspect the upstream Rust code and document reusable integration points
+2. update `spotifydl-core` design notes for library-mode integration
+3. only then start implementation
+
+### Guardrails
+
+- Do not regress the current GUI/service checkpoint while exploring integration.
+- Do not couple storage schemas directly to upstream internal types.
+- Do not delete the process adapter until the library adapter is validated by real runs.
+- Prefer additive integration behind the existing core trait boundary.
