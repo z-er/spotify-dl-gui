@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 directories.workspace = true
 serde_json.workspace = true
+spotifydl-protocol = { path = "../spotifydl-protocol" }
 spotifydl-service = { path = "../spotifydl-service" }

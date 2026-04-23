@@ -1576,7 +1576,10 @@ mod tests {
             .expect("job should be active before reopen");
         assert_eq!(active_before, job_id);
         assert_eq!(service.snapshot().queue.jobs[0].state, JobState::Running);
-        assert_eq!(service.snapshot().queue.jobs[0].items[0].state, ItemState::Running);
+        assert_eq!(
+            service.snapshot().queue.jobs[0].items[0].state,
+            ItemState::Running
+        );
 
         drop(service);
 
@@ -1600,12 +1603,9 @@ mod tests {
             "Recovered as paused after restart"
         );
         assert!(snapshot.service_health.last_recovery_at_ms.is_some());
-        assert!(
-            snapshot
-                .logs
-                .iter()
-                .any(|entry| entry.message == "Recovered persisted runtime state and paused active jobs")
-        );
+        assert!(snapshot.logs.iter().any(
+            |entry| entry.message == "Recovered persisted runtime state and paused active jobs"
+        ));
 
         drop(reopened);
         let _ = fs::remove_file(&database_path);
@@ -1624,8 +1624,10 @@ mod tests {
         )
         .expect("service should open with scripted backend");
 
-        let (job_id, item_ids) =
-            enqueue_urls(&mut service, &["https://open.spotify.com/track/recover-backoff-1"]);
+        let (job_id, item_ids) = enqueue_urls(
+            &mut service,
+            &["https://open.spotify.com/track/recover-backoff-1"],
+        );
         let item_id = item_ids[0].clone();
 
         handle.push_start(vec![
@@ -1654,7 +1656,10 @@ mod tests {
 
         assert_eq!(service.snapshot().queue.status, QueueStatus::Backoff);
         assert!(service.snapshot().service_health.backoff.active);
-        assert_eq!(service.snapshot().service_health.backoff.remaining_ms, 4_000);
+        assert_eq!(
+            service.snapshot().service_health.backoff.remaining_ms,
+            4_000
+        );
 
         drop(service);
 

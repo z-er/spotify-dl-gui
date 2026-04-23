@@ -94,7 +94,8 @@ That script will:
 - create `dist\rust-package\`
 - copy the Rust CLI and GUI into that directory
 - copy `spotify-dl.exe` into the packaged root
-- run `spotifydl-cli.exe status --require-ready` against a package-local SQLite file
+- configure the package-local SQLite file to use the `External` backend
+- run `spotifydl-cli.exe status --require-ready` against that package-local SQLite file
 
 Useful variants:
 

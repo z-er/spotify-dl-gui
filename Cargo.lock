@@ -3227,6 +3227,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "serde_json",
+ "spotifydl-protocol",
  "spotifydl-service",
 ]
 

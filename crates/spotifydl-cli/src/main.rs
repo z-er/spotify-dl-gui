@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, process};
 
 use directories::ProjectDirs;
 use serde_json::json;
+use spotifydl_protocol::{BackendKind, ServiceCommand};
 use spotifydl_service::SpotifydlService;
 
 fn main() {
@@ -20,94 +21,12 @@ fn main() {
             database_path,
             json_output,
             require_ready,
-        } => {
-            let database_path = database_path.unwrap_or_else(default_database_path);
-            let service = match SpotifydlService::open(&database_path) {
-                Ok(service) => service,
-                Err(error) => {
-                    eprintln!(
-                        "failed to open service at {}: {error}",
-                        database_path.display()
-                    );
-                    process::exit(1);
-                }
-            };
-
-            let snapshot = service.snapshot();
-            let active_job = snapshot
-                .queue
-                .active_job_id
-                .as_ref()
-                .map(|job_id| job_id.to_string());
-
-            if json_output {
-                let payload = json!({
-                    "database_path": service.database_path().display().to_string(),
-                    "backend_name": snapshot.service_health.backend_name,
-                    "backend_ready": snapshot.service_health.backend_ready,
-                    "backend_status_message": snapshot.service_health.backend_status_message,
-                    "preferred_backend": format!("{:?}", snapshot.settings.preferred_backend),
-                    "external_backend_executable": snapshot.settings.external_backend_executable,
-                    "queue_status": format!("{:?}", snapshot.queue.status),
-                    "active_job_id": active_job,
-                    "queue_jobs": snapshot.queue.jobs.len(),
-                    "history_jobs": snapshot.history.len(),
-                    "log_entries": snapshot.logs.len(),
-                    "default_destination": snapshot.settings.default_destination,
-                    "default_format": snapshot.settings.default_format,
-                    "max_parallel": snapshot.settings.max_parallel,
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&payload)
-                        .expect("status payload should serialize")
-                );
-            } else {
-                println!("spotifydl CLI");
-                println!("database: {}", service.database_path().display());
-                println!("backend: {}", snapshot.service_health.backend_name);
-                println!(
-                    "backend status: {}",
-                    render_backend_status(
-                        snapshot.service_health.backend_ready,
-                        &snapshot.service_health.backend_status_message
-                    )
-                );
-                println!(
-                    "preferred backend: {:?}",
-                    snapshot.settings.preferred_backend
-                );
-                println!(
-                    "external executable: {}",
-                    blank_to_placeholder(
-                        &snapshot.settings.external_backend_executable,
-                        "(auto-discover bundled/PATH)"
-                    )
-                );
-                println!("queue status: {:?}", snapshot.queue.status);
-                println!("active job: {}", active_job.as_deref().unwrap_or("(none)"));
-                println!("queue jobs: {}", snapshot.queue.jobs.len());
-                println!("history jobs: {}", snapshot.history.len());
-                println!("log entries: {}", snapshot.logs.len());
-                println!(
-                    "defaults: destination={} format={} max_parallel={}",
-                    blank_to_placeholder(&snapshot.settings.default_destination, "(empty)"),
-                    blank_to_placeholder(&snapshot.settings.default_format, "(empty)"),
-                    snapshot.settings.max_parallel,
-                );
-            }
-
-            if require_ready && !snapshot.service_health.backend_ready {
-                eprintln!(
-                    "backend is not ready: {}",
-                    render_backend_status(
-                        snapshot.service_health.backend_ready,
-                        &snapshot.service_health.backend_status_message
-                    )
-                );
-                process::exit(3);
-            }
-        }
+        } => run_status(database_path, json_output, require_ready),
+        CliCommand::ConfigureBackend {
+            database_path,
+            backend,
+            executable,
+        } => run_configure_backend(database_path, backend, executable),
     }
 }
 
@@ -117,6 +36,11 @@ enum CliCommand {
         database_path: Option<PathBuf>,
         json_output: bool,
         require_ready: bool,
+    },
+    ConfigureBackend {
+        database_path: Option<PathBuf>,
+        backend: BackendKind,
+        executable: Option<String>,
     },
 }
 
@@ -159,9 +83,7 @@ impl CliCommand {
                             print_usage();
                             process::exit(0);
                         }
-                        other => {
-                            return Err(format!("unrecognized argument: {other}"));
-                        }
+                        other => return Err(format!("unrecognized argument: {other}")),
                     }
                 }
 
@@ -171,8 +93,192 @@ impl CliCommand {
                     require_ready,
                 })
             }
+            "configure-backend" => {
+                let mut database_path = None;
+                let mut backend = None;
+                let mut executable = None;
+
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--database" => {
+                            let Some(path) = args.get(index + 1) else {
+                                return Err("--database requires a path".to_string());
+                            };
+                            database_path = Some(PathBuf::from(path));
+                            index += 2;
+                        }
+                        "--backend" => {
+                            let Some(value) = args.get(index + 1) else {
+                                return Err("--backend requires a value".to_string());
+                            };
+                            backend = Some(parse_backend_kind(value)?);
+                            index += 2;
+                        }
+                        "--executable" => {
+                            let Some(value) = args.get(index + 1) else {
+                                return Err("--executable requires a value".to_string());
+                            };
+                            executable = Some(value.clone());
+                            index += 2;
+                        }
+                        "--help" | "-h" => {
+                            print_usage();
+                            process::exit(0);
+                        }
+                        other => return Err(format!("unrecognized argument: {other}")),
+                    }
+                }
+
+                let Some(backend) = backend else {
+                    return Err("--backend is required".to_string());
+                };
+
+                Ok(Self::ConfigureBackend {
+                    database_path,
+                    backend,
+                    executable,
+                })
+            }
             other => Err(format!("unrecognized command: {other}")),
         }
+    }
+}
+
+fn run_status(database_path: Option<PathBuf>, json_output: bool, require_ready: bool) {
+    let database_path = database_path.unwrap_or_else(default_database_path);
+    let service = open_service_or_exit(&database_path);
+    let snapshot = service.snapshot();
+    let active_job = snapshot
+        .queue
+        .active_job_id
+        .as_ref()
+        .map(|job_id| job_id.to_string());
+
+    if json_output {
+        let payload = json!({
+            "database_path": service.database_path().display().to_string(),
+            "backend_name": snapshot.service_health.backend_name,
+            "backend_ready": snapshot.service_health.backend_ready,
+            "backend_status_message": snapshot.service_health.backend_status_message,
+            "preferred_backend": format!("{:?}", snapshot.settings.preferred_backend),
+            "external_backend_executable": snapshot.settings.external_backend_executable,
+            "queue_status": format!("{:?}", snapshot.queue.status),
+            "active_job_id": active_job,
+            "queue_jobs": snapshot.queue.jobs.len(),
+            "history_jobs": snapshot.history.len(),
+            "log_entries": snapshot.logs.len(),
+            "default_destination": snapshot.settings.default_destination,
+            "default_format": snapshot.settings.default_format,
+            "max_parallel": snapshot.settings.max_parallel,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("status payload should serialize")
+        );
+    } else {
+        println!("spotifydl CLI");
+        println!("database: {}", service.database_path().display());
+        println!("backend: {}", snapshot.service_health.backend_name);
+        println!(
+            "backend status: {}",
+            render_backend_status(
+                snapshot.service_health.backend_ready,
+                &snapshot.service_health.backend_status_message
+            )
+        );
+        println!(
+            "preferred backend: {:?}",
+            snapshot.settings.preferred_backend
+        );
+        println!(
+            "external executable: {}",
+            blank_to_placeholder(
+                &snapshot.settings.external_backend_executable,
+                "(auto-discover bundled/PATH)"
+            )
+        );
+        println!("queue status: {:?}", snapshot.queue.status);
+        println!("active job: {}", active_job.as_deref().unwrap_or("(none)"));
+        println!("queue jobs: {}", snapshot.queue.jobs.len());
+        println!("history jobs: {}", snapshot.history.len());
+        println!("log entries: {}", snapshot.logs.len());
+        println!(
+            "defaults: destination={} format={} max_parallel={}",
+            blank_to_placeholder(&snapshot.settings.default_destination, "(empty)"),
+            blank_to_placeholder(&snapshot.settings.default_format, "(empty)"),
+            snapshot.settings.max_parallel,
+        );
+    }
+
+    if require_ready && !snapshot.service_health.backend_ready {
+        eprintln!(
+            "backend is not ready: {}",
+            render_backend_status(
+                snapshot.service_health.backend_ready,
+                &snapshot.service_health.backend_status_message
+            )
+        );
+        process::exit(3);
+    }
+}
+
+fn run_configure_backend(
+    database_path: Option<PathBuf>,
+    backend: BackendKind,
+    executable: Option<String>,
+) {
+    let database_path = database_path.unwrap_or_else(default_database_path);
+    let mut service = open_service_or_exit(&database_path);
+    let mut settings = service.snapshot().settings.clone();
+    settings.preferred_backend = backend;
+    settings.external_backend_executable = executable.unwrap_or_default();
+
+    if let Err(error) = service.dispatch(ServiceCommand::UpdateSettings { settings }) {
+        eprintln!(
+            "failed to update backend settings at {}: {error}",
+            database_path.display()
+        );
+        process::exit(1);
+    }
+
+    let snapshot = service.snapshot();
+    println!(
+        "configured backend: {:?} ({})",
+        snapshot.settings.preferred_backend,
+        render_backend_status(
+            snapshot.service_health.backend_ready,
+            &snapshot.service_health.backend_status_message
+        )
+    );
+    println!(
+        "external executable: {}",
+        blank_to_placeholder(
+            &snapshot.settings.external_backend_executable,
+            "(auto-discover bundled/PATH)"
+        )
+    );
+}
+
+fn open_service_or_exit(database_path: &PathBuf) -> SpotifydlService {
+    match SpotifydlService::open(database_path) {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!(
+                "failed to open service at {}: {error}",
+                database_path.display()
+            );
+            process::exit(1);
+        }
+    }
+}
+
+fn parse_backend_kind(value: &str) -> Result<BackendKind, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "fake" => Ok(BackendKind::Fake),
+        "external" => Ok(BackendKind::External),
+        other => Err(format!(
+            "unsupported backend `{other}`; expected `fake` or `external`"
+        )),
     }
 }
 
@@ -208,6 +314,9 @@ fn print_usage() {
     eprintln!(
         "  cargo run -p spotifydl-cli -- status [--json] [--require-ready] [--database PATH]"
     );
+    eprintln!(
+        "  cargo run -p spotifydl-cli -- configure-backend --backend <fake|external> [--executable PATH] [--database PATH]"
+    );
 }
 
 #[cfg(test)]
@@ -236,6 +345,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_configure_backend_flags() {
+        let args = vec![
+            "configure-backend".to_string(),
+            "--backend".to_string(),
+            "external".to_string(),
+            "--executable".to_string(),
+            "spotify-dl.exe".to_string(),
+            "--database".to_string(),
+            "C:/data/app.sqlite".to_string(),
+        ];
+
+        let command = CliCommand::parse(&args).expect("configure args should parse");
+        assert_eq!(
+            command,
+            CliCommand::ConfigureBackend {
+                database_path: Some(PathBuf::from("C:/data/app.sqlite")),
+                backend: BackendKind::External,
+                executable: Some("spotify-dl.exe".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn defaults_to_status_command() {
         let command = CliCommand::parse(&[]).expect("empty args should parse");
         assert_eq!(
@@ -246,6 +378,13 @@ mod tests {
                 require_ready: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_backend_kind() {
+        assert_eq!(parse_backend_kind("fake"), Ok(BackendKind::Fake));
+        assert_eq!(parse_backend_kind("external"), Ok(BackendKind::External));
+        assert!(parse_backend_kind("invalid").is_err());
     }
 
     #[test]

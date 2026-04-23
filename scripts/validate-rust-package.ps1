@@ -84,6 +84,12 @@ if (Test-Path -LiteralPath $validationDatabase) {
     Remove-Item -LiteralPath $validationDatabase -Force
 }
 
+Write-Host "Configuring packaged CLI to use the external backend..."
+& $cliDestination "configure-backend" "--database" $validationDatabase "--backend" "external"
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged CLI backend configuration failed with exit code $LASTEXITCODE."
+}
+
 $statusArgs = @("status", "--require-ready", "--database", $validationDatabase)
 if ($JsonStatus) {
     $statusArgs += "--json"
