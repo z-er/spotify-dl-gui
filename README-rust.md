@@ -328,6 +328,7 @@ Current state:
 - reopen recovery is covered for persisted active runs and persisted active backoff state
 - reopen recovery preserves terminal item state/details while only in-flight items are converted to paused
 - service has a process-boundary external backend smoke test that exercises real stdout JSON decoding into history state
+- process-boundary external backend smoke tests now cover success/partial failure, skip with backoff, and non-zero process exit behavior
 
 Remaining high-value work:
 - restart/interruption truthfulness against real external runs

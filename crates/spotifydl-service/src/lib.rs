@@ -1789,7 +1789,18 @@ mod tests {
     fn maps_real_external_backend_process_events_into_history_state() {
         let database_path = temp_database_path();
         let temp_root = temp_fixture_dir("external-smoke");
-        let script_path = write_external_smoke_script(&temp_root);
+        let script_path = write_external_script(
+            &temp_root,
+            "external-smoke.cmd",
+            &[
+                r#"echo {"event":"track_start","track_id":"smoke1","track":"Smoke Track 1"}"#,
+                r#"echo {"event":"stage","track_id":"smoke1","track":"Smoke Track 1","stage":"download","status":"progress","progress":50}"#,
+                r#"echo {"event":"track_complete","track_id":"smoke1","track":"Smoke Track 1","path":"C:/music/smoke1.flac"}"#,
+                r#"echo {"event":"track_start","track_id":"smoke2","track":"Smoke Track 2"}"#,
+                r#"echo {"event":"track_failed","track_id":"smoke2","track":"Smoke Track 2","reason":"network timeout"}"#,
+            ],
+            0,
+        );
         let comspec = std::env::var_os("ComSpec")
             .map(PathBuf::from)
             .expect("ComSpec should point to cmd.exe");
@@ -1871,6 +1882,182 @@ mod tests {
                 entry.message.contains("Launching external downloader:")
             }),
             "expected launch log from external backend"
+        );
+
+        drop(service);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn maps_real_external_backoff_and_skip_events() {
+        let database_path = temp_database_path();
+        let temp_root = temp_fixture_dir("external-backoff-skip");
+        let script_path = write_external_script(
+            &temp_root,
+            "external-backoff-skip.cmd",
+            &[
+                r#"echo {"event":"track_start","track_id":"skip1","track":"Skip Track"}"#,
+                r#"echo {"event":"rate_limit_backoff","reason":"rate limited","delay_ms":1500}"#,
+                r#"echo {"event":"rate_limit_wait","waited_ms":1500}"#,
+                r#"echo {"event":"track_skipped","track_id":"skip1","track":"Skip Track"}"#,
+            ],
+            0,
+        );
+        let comspec = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .expect("ComSpec should point to cmd.exe");
+
+        let mut service = SpotifydlService::open_with_backend(
+            &database_path,
+            Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
+                executable: comspec,
+                working_directory: Some(temp_root.clone()),
+                base_args: vec![
+                    "/C".to_string(),
+                    script_path.to_string_lossy().to_string(),
+                ],
+                environment: Vec::new(),
+            })),
+        )
+        .expect("service should open with external backend");
+
+        let (job_id, item_ids) =
+            enqueue_urls(&mut service, &["https://open.spotify.com/track/skip1"]);
+        let item_id = item_ids[0].clone();
+        let mut saw_backoff = false;
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        for _ in 0..80 {
+            if service
+                .snapshot()
+                .history
+                .iter()
+                .any(|entry| entry.job.id == job_id)
+            {
+                break;
+            }
+
+            let events = dispatch_ok(&mut service, ServiceCommand::Tick);
+            if events
+                .iter()
+                .any(|event| matches!(event, ServiceEvent::BackoffStarted(_)))
+            {
+                saw_backoff = true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(saw_backoff, "expected queue to enter backoff during external run");
+
+        let history_job = service
+            .snapshot()
+            .history
+            .iter()
+            .find(|entry| entry.job.id == job_id)
+            .expect("job should move to history")
+            .job
+            .clone();
+
+        assert_eq!(history_job.state, JobState::Completed);
+        assert_eq!(history_job.totals.items_completed, 1);
+        assert_eq!(history_job.totals.outputs_written, 0);
+        assert_eq!(history_job.totals.flagged_items, 1);
+        assert!(!service.snapshot().service_health.backoff.active);
+
+        let item = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .expect("history item should exist");
+        assert_eq!(item.state, ItemState::Completed);
+        assert!(item.outputs.is_empty());
+        assert_eq!(item.flags.len(), 1);
+        assert_eq!(item.flags[0].kind, "skip");
+
+        drop(service);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn maps_real_external_process_exit_failure_into_failed_history_job() {
+        let database_path = temp_database_path();
+        let temp_root = temp_fixture_dir("external-exit-failure");
+        let script_path = write_external_script(
+            &temp_root,
+            "external-exit-failure.cmd",
+            &[r#"echo {"event":"track_start","track_id":"exit1","track":"Exit Failure Track"}"#],
+            7,
+        );
+        let comspec = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .expect("ComSpec should point to cmd.exe");
+
+        let mut service = SpotifydlService::open_with_backend(
+            &database_path,
+            Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
+                executable: comspec,
+                working_directory: Some(temp_root.clone()),
+                base_args: vec![
+                    "/C".to_string(),
+                    script_path.to_string_lossy().to_string(),
+                ],
+                environment: Vec::new(),
+            })),
+        )
+        .expect("service should open with external backend");
+
+        let (job_id, item_ids) =
+            enqueue_urls(&mut service, &["https://open.spotify.com/track/exit1"]);
+        let item_id = item_ids[0].clone();
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        pump_ticks_until(
+            &mut service,
+            |service| {
+                service
+                    .snapshot()
+                    .history
+                    .iter()
+                    .any(|entry| entry.job.id == job_id)
+            },
+            80,
+        );
+
+        let history_job = service
+            .snapshot()
+            .history
+            .iter()
+            .find(|entry| entry.job.id == job_id)
+            .expect("job should move to history")
+            .job
+            .clone();
+
+        assert_eq!(history_job.state, JobState::Failed);
+        assert_eq!(history_job.totals.items_failed, 1);
+        assert_eq!(
+            history_job.error_message.as_deref(),
+            Some("External downloader exited unsuccessfully")
+        );
+
+        let item = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .expect("history item should exist");
+        assert_eq!(item.state, ItemState::Failed);
+        assert_eq!(
+            item.failure_reason
+                .as_ref()
+                .and_then(|reason| reason.code.as_deref()),
+            Some("EXIT_7")
+        );
+        assert!(
+            service.snapshot().logs.iter().any(|entry| {
+                entry.message.contains("External downloader exited with status Some(7)")
+            }),
+            "expected exit-status log from external backend"
         );
 
         drop(service);
@@ -2499,36 +2686,19 @@ mod tests {
         path
     }
 
-    fn write_external_smoke_script(root: &PathBuf) -> PathBuf {
-        let script_path = root.join("external-smoke.cmd");
+    fn write_external_script(
+        root: &PathBuf,
+        file_name: &str,
+        lines: &[&str],
+        exit_code: i32,
+    ) -> PathBuf {
+        let script_path = root.join(file_name);
         let mut file = fs::File::create(&script_path).expect("smoke script should create");
         writeln!(file, "@echo off").expect("script should write");
-        writeln!(
-            file,
-            "echo {{\"event\":\"track_start\",\"track_id\":\"smoke1\",\"track\":\"Smoke Track 1\"}}"
-        )
-        .expect("script should write");
-        writeln!(
-            file,
-            "echo {{\"event\":\"stage\",\"track_id\":\"smoke1\",\"track\":\"Smoke Track 1\",\"stage\":\"download\",\"status\":\"progress\",\"progress\":50}}"
-        )
-        .expect("script should write");
-        writeln!(
-            file,
-            "echo {{\"event\":\"track_complete\",\"track_id\":\"smoke1\",\"track\":\"Smoke Track 1\",\"path\":\"C:/music/smoke1.flac\"}}"
-        )
-        .expect("script should write");
-        writeln!(
-            file,
-            "echo {{\"event\":\"track_start\",\"track_id\":\"smoke2\",\"track\":\"Smoke Track 2\"}}"
-        )
-        .expect("script should write");
-        writeln!(
-            file,
-            "echo {{\"event\":\"track_failed\",\"track_id\":\"smoke2\",\"track\":\"Smoke Track 2\",\"reason\":\"network timeout\"}}"
-        )
-        .expect("script should write");
-        writeln!(file, "exit /b 0").expect("script should write");
+        for line in lines {
+            writeln!(file, "{line}").expect("script should write");
+        }
+        writeln!(file, "exit /b {exit_code}").expect("script should write");
         script_path
     }
 
