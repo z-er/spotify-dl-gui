@@ -857,12 +857,11 @@ impl SpotifydlService {
         for job in &mut self.snapshot.queue.jobs {
             if job.state == JobState::Running {
                 job.state = JobState::Paused;
-                job.progress.detail = "Recovered as paused after restart".to_string();
                 for item in &mut job.items {
                     if item.state == ItemState::Running {
                         item.state = ItemState::Paused;
+                        item.progress.detail = "Recovered as paused after restart".to_string();
                     }
-                    item.progress.detail = "Recovered as paused after restart".to_string();
                 }
                 Self::refresh_job_derived_state(job);
                 recovered_any = true;
@@ -1676,6 +1675,108 @@ mod tests {
         assert_eq!(snapshot.service_health.backoff.reason, "rate limited");
         assert_eq!(snapshot.service_health.backoff.delay_ms, 4_000);
         assert!(snapshot.service_health.last_recovery_at_ms.is_some());
+
+        drop(reopened);
+        let _ = fs::remove_file(&database_path);
+    }
+
+    #[test]
+    fn preserves_terminal_item_state_details_when_recovering_active_job() {
+        let database_path = temp_database_path();
+        let handle = ScriptedBackendHandle::default();
+        let mut service = SpotifydlService::open_with_backend(
+            &database_path,
+            Box::new(ScriptedBackend::with_capabilities(
+                handle.clone(),
+                BackendCapabilities::default(),
+            )),
+        )
+        .expect("service should open with scripted backend");
+
+        let (job_id, item_ids) = enqueue_urls(
+            &mut service,
+            &[
+                "https://open.spotify.com/track/recover-failed-1",
+                "https://open.spotify.com/track/recover-failed-2",
+            ],
+        );
+        let failed_item_id = item_ids[0].clone();
+        let active_item_id = item_ids[1].clone();
+
+        handle.push_start(vec![
+            BackendEvent::JobStarted {
+                job_id: job_id.clone(),
+            },
+            BackendEvent::ItemStarted {
+                job_id: job_id.clone(),
+                item_id: failed_item_id.clone(),
+                label: Some("Recover Failed Track".to_string()),
+                metadata: None,
+            },
+        ]);
+        handle.push_tick(vec![
+            BackendEvent::ItemFinished {
+                job_id: job_id.clone(),
+                item_id: failed_item_id.clone(),
+                state: ItemState::Failed,
+                failure_reason: Some(FailureReason {
+                    kind: FailureReasonKind::Network,
+                    code: Some("NETWORK".to_string()),
+                    message: "network timeout".to_string(),
+                    details: None,
+                }),
+            },
+            BackendEvent::ItemStarted {
+                job_id: job_id.clone(),
+                item_id: active_item_id.clone(),
+                label: Some("Recover Running Track".to_string()),
+                metadata: None,
+            },
+        ]);
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        dispatch_ok(&mut service, ServiceCommand::Tick);
+
+        let before_reopen = &service.snapshot().queue.jobs[0];
+        assert_eq!(before_reopen.items[0].state, ItemState::Failed);
+        assert_eq!(before_reopen.items[0].progress.detail, "Failed");
+        assert_eq!(before_reopen.items[1].state, ItemState::Running);
+
+        drop(service);
+
+        let reopened = SpotifydlService::open(&database_path).expect("service should reopen");
+        let snapshot = reopened.snapshot();
+        let recovered_job = &snapshot.queue.jobs[0];
+        let recovered_failed_item = recovered_job
+            .items
+            .iter()
+            .find(|item| item.id == failed_item_id)
+            .expect("failed item should still exist");
+        let recovered_active_item = recovered_job
+            .items
+            .iter()
+            .find(|item| item.id == active_item_id)
+            .expect("active item should still exist");
+
+        assert_eq!(snapshot.queue.status, QueueStatus::Paused);
+        assert!(snapshot.queue.active_job_id.is_none());
+        assert_eq!(recovered_job.id, job_id);
+        assert_eq!(recovered_job.state, JobState::Paused);
+        assert_eq!(recovered_failed_item.state, ItemState::Failed);
+        assert_eq!(recovered_failed_item.progress.detail, "Failed");
+        assert_eq!(
+            recovered_failed_item
+                .failure_reason
+                .as_ref()
+                .expect("failed item reason")
+                .message,
+            "network timeout"
+        );
+        assert_eq!(recovered_active_item.state, ItemState::Paused);
+        assert_eq!(
+            recovered_active_item.progress.detail,
+            "Recovered as paused after restart"
+        );
 
         drop(reopened);
         let _ = fs::remove_file(&database_path);

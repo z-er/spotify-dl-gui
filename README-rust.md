@@ -326,6 +326,7 @@ Current state:
 - partial success, skip flags, backoff, requeue, backend preflight, and boundary pause are covered by tests
 - backend readiness is surfaced into persisted service health
 - reopen recovery is covered for persisted active runs and persisted active backoff state
+- reopen recovery preserves terminal item state/details while only in-flight items are converted to paused
 
 Remaining high-value work:
 - restart/interruption truthfulness against real external runs
