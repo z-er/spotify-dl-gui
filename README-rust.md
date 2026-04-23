@@ -327,6 +327,7 @@ Current state:
 - backend readiness is surfaced into persisted service health
 - reopen recovery is covered for persisted active runs and persisted active backoff state
 - reopen recovery preserves terminal item state/details while only in-flight items are converted to paused
+- service has a process-boundary external backend smoke test that exercises real stdout JSON decoding into history state
 
 Remaining high-value work:
 - restart/interruption truthfulness against real external runs

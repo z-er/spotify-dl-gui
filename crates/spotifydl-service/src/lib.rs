@@ -1352,8 +1352,11 @@ mod tests {
     use std::{
         collections::VecDeque,
         fs,
+        io::Write,
+        path::PathBuf,
         sync::{Arc, Mutex},
-        time::{SystemTime, UNIX_EPOCH},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
@@ -1780,6 +1783,99 @@ mod tests {
 
         drop(reopened);
         let _ = fs::remove_file(&database_path);
+    }
+
+    #[test]
+    fn maps_real_external_backend_process_events_into_history_state() {
+        let database_path = temp_database_path();
+        let temp_root = temp_fixture_dir("external-smoke");
+        let script_path = write_external_smoke_script(&temp_root);
+        let comspec = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .expect("ComSpec should point to cmd.exe");
+
+        let mut service = SpotifydlService::open_with_backend(
+            &database_path,
+            Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
+                executable: comspec,
+                working_directory: Some(temp_root.clone()),
+                base_args: vec![
+                    "/C".to_string(),
+                    script_path.to_string_lossy().to_string(),
+                ],
+                environment: Vec::new(),
+            })),
+        )
+        .expect("service should open with external backend");
+
+        let (job_id, item_ids) = enqueue_urls(
+            &mut service,
+            &[
+                "https://open.spotify.com/track/smoke1",
+                "https://open.spotify.com/track/smoke2",
+            ],
+        );
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        pump_ticks_until(
+            &mut service,
+            |service| service
+                .snapshot()
+                .history
+                .iter()
+                .any(|entry| entry.job.id == job_id),
+            80,
+        );
+
+        let history_job = service
+            .snapshot()
+            .history
+            .iter()
+            .find(|entry| entry.job.id == job_id)
+            .expect("job should move to history")
+            .job
+            .clone();
+
+        assert_eq!(history_job.state, JobState::Failed);
+        assert_eq!(history_job.totals.items_completed, 1);
+        assert_eq!(history_job.totals.items_failed, 1);
+        assert_eq!(history_job.totals.outputs_written, 1);
+        assert_eq!(history_job.items.len(), 2);
+
+        let completed_item = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_ids[0])
+            .expect("completed item should exist");
+        assert_eq!(completed_item.state, ItemState::Completed);
+        assert_eq!(completed_item.outputs.len(), 1);
+        assert_eq!(completed_item.outputs[0].final_path, "C:/music/smoke1.flac");
+
+        let failed_item = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_ids[1])
+            .expect("failed item should exist");
+        assert_eq!(failed_item.state, ItemState::Failed);
+        assert_eq!(
+            failed_item
+                .failure_reason
+                .as_ref()
+                .expect("failed item reason")
+                .message,
+            "network timeout"
+        );
+
+        assert!(
+            service.snapshot().logs.iter().any(|entry| {
+                entry.message.contains("Launching external downloader:")
+            }),
+            "expected launch log from external backend"
+        );
+
+        drop(service);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -2391,5 +2487,68 @@ mod tests {
             .expect("time should advance")
             .as_nanos();
         std::env::temp_dir().join(format!("spotifydl-service-test-{unique}.sqlite"))
+    }
+
+    fn temp_fixture_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should advance")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{unique}"));
+        fs::create_dir_all(&path).expect("temp fixture dir should create");
+        path
+    }
+
+    fn write_external_smoke_script(root: &PathBuf) -> PathBuf {
+        let script_path = root.join("external-smoke.cmd");
+        let mut file = fs::File::create(&script_path).expect("smoke script should create");
+        writeln!(file, "@echo off").expect("script should write");
+        writeln!(
+            file,
+            "echo {{\"event\":\"track_start\",\"track_id\":\"smoke1\",\"track\":\"Smoke Track 1\"}}"
+        )
+        .expect("script should write");
+        writeln!(
+            file,
+            "echo {{\"event\":\"stage\",\"track_id\":\"smoke1\",\"track\":\"Smoke Track 1\",\"stage\":\"download\",\"status\":\"progress\",\"progress\":50}}"
+        )
+        .expect("script should write");
+        writeln!(
+            file,
+            "echo {{\"event\":\"track_complete\",\"track_id\":\"smoke1\",\"track\":\"Smoke Track 1\",\"path\":\"C:/music/smoke1.flac\"}}"
+        )
+        .expect("script should write");
+        writeln!(
+            file,
+            "echo {{\"event\":\"track_start\",\"track_id\":\"smoke2\",\"track\":\"Smoke Track 2\"}}"
+        )
+        .expect("script should write");
+        writeln!(
+            file,
+            "echo {{\"event\":\"track_failed\",\"track_id\":\"smoke2\",\"track\":\"Smoke Track 2\",\"reason\":\"network timeout\"}}"
+        )
+        .expect("script should write");
+        writeln!(file, "exit /b 0").expect("script should write");
+        script_path
+    }
+
+    fn pump_ticks_until(
+        service: &mut SpotifydlService,
+        mut condition: impl FnMut(&SpotifydlService) -> bool,
+        max_ticks: usize,
+    ) {
+        for _ in 0..max_ticks {
+            if condition(service) {
+                return;
+            }
+
+            dispatch_ok(service, ServiceCommand::Tick);
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            condition(service),
+            "condition was not met within {max_ticks} ticks"
+        );
     }
 }
