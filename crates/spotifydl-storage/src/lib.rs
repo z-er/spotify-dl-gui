@@ -853,6 +853,7 @@ impl SqliteStore {
         let max_parallel = self.load_setting::<u16>("max_parallel")?;
         let max_history_entries = self.load_setting::<usize>("max_history_entries")?;
         let max_log_entries = self.load_setting::<usize>("max_log_entries")?;
+        let theme_mode = self.load_setting("theme_mode")?;
         let database_path = self.load_setting::<String>("database_path")?;
         let preferred_backend = self.load_setting("preferred_backend")?;
         let external_backend_executable =
@@ -863,6 +864,7 @@ impl SqliteStore {
             || max_parallel.is_some()
             || max_history_entries.is_some()
             || max_log_entries.is_some()
+            || theme_mode.is_some()
             || database_path.is_some()
             || preferred_backend.is_some()
             || external_backend_executable.is_some();
@@ -886,6 +888,9 @@ impl SqliteStore {
         }
         if let Some(value) = max_log_entries {
             settings.max_log_entries = value;
+        }
+        if let Some(value) = theme_mode {
+            settings.theme_mode = value;
         }
         if let Some(value) = database_path {
             settings.database_path = value;
@@ -918,6 +923,7 @@ impl SqliteStore {
             timestamp,
         )?;
         Self::save_setting(tx, "max_log_entries", &settings.max_log_entries, timestamp)?;
+        Self::save_setting(tx, "theme_mode", &settings.theme_mode, timestamp)?;
         Self::save_setting(
             tx,
             "preferred_backend",

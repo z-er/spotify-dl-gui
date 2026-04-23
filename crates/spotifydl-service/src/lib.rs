@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use spotifydl_core::{
     BackendControl, BackendControlRequest, BackendEvent, BackendHealth, BackendItemDescriptor,
@@ -27,6 +30,14 @@ pub struct SpotifydlService {
     store: SqliteStore,
     backend: Box<dyn DownloadBackend>,
     next_log_seq: u64,
+    collection_progress: HashMap<JobId, CollectionProgress>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CollectionProgress {
+    started_units: u32,
+    finished_units: u32,
+    current_unit_label: Option<String>,
 }
 
 impl SpotifydlService {
@@ -67,6 +78,7 @@ impl SpotifydlService {
             snapshot,
             store,
             backend,
+            collection_progress: HashMap::new(),
         };
 
         service.recover_runtime_state();
@@ -207,7 +219,7 @@ impl SpotifydlService {
 
             if added > 0 {
                 job.updated_at_ms = now;
-                Self::refresh_job_derived_state(job);
+                Self::refresh_job_derived_state(job, None);
                 events.push(ServiceEvent::JobUpdated(job.clone()));
             }
         }
@@ -237,7 +249,7 @@ impl SpotifydlService {
                             item.updated_at_ms = job.updated_at_ms;
                         }
                     }
-                    Self::refresh_job_derived_state(job);
+                    Self::refresh_job_derived_state(job, None);
                     events.push(ServiceEvent::JobUpdated(job.clone()));
                     should_resume = capabilities.supports_immediate_pause_resume;
                 }
@@ -283,7 +295,7 @@ impl SpotifydlService {
                         }
                     }
 
-                    Self::refresh_job_derived_state(job);
+                    Self::refresh_job_derived_state(job, None);
                     events.push(ServiceEvent::JobUpdated(job.clone()));
                 }
 
@@ -417,7 +429,7 @@ impl SpotifydlService {
             job.updated_at_ms = now;
             job.started_at_ms.get_or_insert(now);
             job.progress.detail = "Waiting for backend events".to_string();
-            Self::refresh_job_derived_state(job);
+            Self::refresh_job_derived_state(job, None);
             events.push(ServiceEvent::JobUpdated(job.clone()));
         }
 
@@ -456,12 +468,20 @@ impl SpotifydlService {
 
                 if let Some(job_index) = self.find_job_index(&job_id) {
                     let now = now_ms();
+                    let collection = {
+                        let job = &self.snapshot.queue.jobs[job_index];
+                        Self::collection_progress_for_start(
+                            &mut self.collection_progress,
+                            job,
+                            label.as_deref(),
+                        )
+                    };
                     let job = &mut self.snapshot.queue.jobs[job_index];
                     if let Some(item) = job.items.iter_mut().find(|item| item.id == item_id) {
                         item.state = ItemState::Running;
                         item.updated_at_ms = now;
                         item.started_at_ms.get_or_insert(now);
-                        item.progress.detail = "Backend started item".to_string();
+                        item.progress = ProgressState::pending("Backend started item");
                         if let Some(label) = label {
                             item.label = label;
                         }
@@ -473,7 +493,7 @@ impl SpotifydlService {
 
                     job.state = JobState::Running;
                     job.updated_at_ms = now;
-                    Self::refresh_job_derived_state(job);
+                    Self::refresh_job_derived_state(job, collection.as_ref());
                     job_clone = Some(job.clone());
                 }
 
@@ -507,7 +527,8 @@ impl SpotifydlService {
 
                     job.state = JobState::Running;
                     job.updated_at_ms = now;
-                    Self::refresh_job_derived_state(job);
+                    let collection = self.collection_progress.get(&job.id).cloned();
+                    Self::refresh_job_derived_state(job, collection.as_ref());
                     job_clone = Some(job.clone());
                 }
 
@@ -536,7 +557,8 @@ impl SpotifydlService {
                     }
 
                     job.updated_at_ms = now;
-                    Self::refresh_job_derived_state(job);
+                    let collection = self.collection_progress.get(&job.id).cloned();
+                    Self::refresh_job_derived_state(job, collection.as_ref());
                     events.push(ServiceEvent::JobUpdated(job.clone()));
                 }
             }
@@ -554,7 +576,8 @@ impl SpotifydlService {
                     }
 
                     job.updated_at_ms = now;
-                    Self::refresh_job_derived_state(job);
+                    let collection = self.collection_progress.get(&job.id).cloned();
+                    Self::refresh_job_derived_state(job, collection.as_ref());
                     events.push(ServiceEvent::JobUpdated(job.clone()));
                 }
             }
@@ -569,6 +592,10 @@ impl SpotifydlService {
 
                 if let Some(job_index) = self.find_job_index(&job_id) {
                     let now = now_ms();
+                    let collection = {
+                        let job = &self.snapshot.queue.jobs[job_index];
+                        Self::collection_progress_for_finish(&mut self.collection_progress, job)
+                    };
                     let job = &mut self.snapshot.queue.jobs[job_index];
                     if let Some(item) = job.items.iter_mut().find(|item| item.id == item_id) {
                         item.state = state;
@@ -587,7 +614,7 @@ impl SpotifydlService {
                     }
 
                     job.updated_at_ms = now;
-                    Self::refresh_job_derived_state(job);
+                    Self::refresh_job_derived_state(job, collection.as_ref());
                     job_clone = Some(job.clone());
                 }
 
@@ -722,9 +749,10 @@ impl SpotifydlService {
         job.updated_at_ms = now;
         job.finished_at_ms = Some(now);
         job.error_message = failure_reason.as_ref().map(|reason| reason.message.clone());
-        Self::refresh_job_derived_state(&mut job);
+        Self::refresh_job_derived_state(&mut job, None);
         job.progress = ProgressState::finished(Self::terminal_detail_for_job(state));
         self.snapshot.queue.active_job_id = None;
+        self.collection_progress.remove(job_id);
 
         if self.snapshot.service_health.backoff.active {
             self.snapshot.service_health.backoff.active = false;
@@ -784,6 +812,7 @@ impl SpotifydlService {
         };
 
         let mut job = self.snapshot.queue.jobs.remove(index);
+        self.collection_progress.remove(job_id);
         let now = now_ms();
 
         for item in &mut job.items {
@@ -809,7 +838,7 @@ impl SpotifydlService {
         job.updated_at_ms = now;
         job.finished_at_ms = Some(now);
         job.error_message = failure_reason.as_ref().map(|reason| reason.message.clone());
-        Self::refresh_job_derived_state(&mut job);
+        Self::refresh_job_derived_state(&mut job, None);
         job.progress = ProgressState::finished(Self::terminal_detail_for_job(state));
 
         self.push_log(
@@ -863,7 +892,7 @@ impl SpotifydlService {
                         item.progress.detail = "Recovered as paused after restart".to_string();
                     }
                 }
-                Self::refresh_job_derived_state(job);
+                Self::refresh_job_derived_state(job, None);
                 recovered_any = true;
             }
         }
@@ -969,7 +998,7 @@ impl SpotifydlService {
                 job.error_message = None;
                 job.progress = ProgressState::pending("Queued");
                 job.updated_at_ms = now;
-                Self::refresh_job_derived_state(job);
+                Self::refresh_job_derived_state(job, None);
                 events.push(ServiceEvent::JobUpdated(job.clone()));
             }
         }
@@ -1233,11 +1262,11 @@ impl SpotifydlService {
             item.flags.clear();
         }
 
-        Self::refresh_job_derived_state(&mut job);
+        Self::refresh_job_derived_state(&mut job, None);
         job
     }
 
-    fn refresh_job_derived_state(job: &mut JobRecord) {
+    fn refresh_job_derived_state(job: &mut JobRecord, collection: Option<&CollectionProgress>) {
         let mut totals = JobTotals {
             items_total: job.items.len() as u32,
             ..JobTotals::default()
@@ -1286,7 +1315,10 @@ impl SpotifydlService {
         }
 
         job.totals = totals;
-        job.progress = if progress_total == 0 {
+        Self::refresh_job_label(job);
+        job.progress = if let Some(progress) = Self::collection_progress_state(job, collection) {
+            progress
+        } else if progress_total == 0 {
             ProgressState::pending("Queued")
         } else if let Some(detail) = running_detail {
             ProgressState::from_steps(progress_current, progress_total, detail)
@@ -1313,6 +1345,146 @@ impl SpotifydlService {
         } else {
             ProgressState::from_steps(progress_current, progress_total, "Queued")
         };
+    }
+
+    fn collection_progress_state(
+        job: &JobRecord,
+        collection: Option<&CollectionProgress>,
+    ) -> Option<ProgressState> {
+        if !Self::uses_collection_progress(job) {
+            return None;
+        }
+
+        let collection = collection?;
+        let item = job.items.first()?;
+
+        let started_units = collection.started_units.max(1);
+        let total_units = if job.state.is_terminal() {
+            started_units.max(collection.finished_units).max(1)
+        } else {
+            started_units.max(collection.finished_units.saturating_add(1))
+        };
+        let current_percent = if item.state == ItemState::Running {
+            u32::from(item.progress.percent)
+        } else {
+            0
+        };
+        let current = collection.finished_units.saturating_mul(100) + current_percent;
+        let total = total_units.saturating_mul(100).max(100);
+        let detail = if job.state.is_terminal() {
+            job.progress.detail.clone()
+        } else if item.state == ItemState::Running {
+            item.progress.detail.clone()
+        } else if job.state == JobState::Paused {
+            "Paused".to_string()
+        } else {
+            "Queued".to_string()
+        };
+
+        Some(ProgressState::from_steps(current, total, detail))
+    }
+
+    fn uses_collection_progress(job: &JobRecord) -> bool {
+        job.items.len() == 1
+            && (job.source_url.contains("/album/")
+                || job.source_url.contains("/playlist/")
+                || job.source_url.contains("/artist/"))
+    }
+
+    fn collection_progress_for_start(
+        map: &mut HashMap<JobId, CollectionProgress>,
+        job: &JobRecord,
+        label: Option<&str>,
+    ) -> Option<CollectionProgress> {
+        if !Self::uses_collection_progress(job) {
+            return None;
+        }
+
+        let key = job.id.clone();
+        let state = map.entry(key.clone()).or_default();
+        let normalized_label = label
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        if normalized_label != state.current_unit_label {
+            state.started_units = state
+                .started_units
+                .max(state.finished_units)
+                .saturating_add(1);
+            state.current_unit_label = normalized_label;
+        }
+
+        Some(state.clone())
+    }
+
+    fn collection_progress_for_finish(
+        map: &mut HashMap<JobId, CollectionProgress>,
+        job: &JobRecord,
+    ) -> Option<CollectionProgress> {
+        if !Self::uses_collection_progress(job) {
+            return None;
+        }
+
+        let state = map.entry(job.id.clone()).or_default();
+        if state.finished_units < state.started_units {
+            state.finished_units += 1;
+        } else {
+            state.started_units = state.started_units.saturating_add(1);
+            state.finished_units = state.started_units;
+        }
+        state.current_unit_label = None;
+        Some(state.clone())
+    }
+
+    fn refresh_job_label(job: &mut JobRecord) {
+        if !looks_like_spotify_url(&job.label)
+            && job.label != "Album download"
+            && job.label != "Playlist download"
+        {
+            return;
+        }
+
+        let source_url = job.source_url.as_str();
+        if source_url.contains("/track/") {
+            if let Some(item) = job.items.first() {
+                if !item.metadata.title.trim().is_empty() {
+                    let artist = if !item.metadata.artist.trim().is_empty() {
+                        item.metadata.artist.trim()
+                    } else {
+                        item.metadata.album_artist.trim()
+                    };
+                    job.label = if artist.is_empty() {
+                        item.metadata.title.trim().to_string()
+                    } else {
+                        format!("{} - {}", item.metadata.title.trim(), artist)
+                    };
+                    return;
+                }
+
+                if !looks_like_spotify_url(&item.label) && !item.label.trim().is_empty() {
+                    job.label = item.label.trim().to_string();
+                }
+            }
+            return;
+        }
+
+        if source_url.contains("/album/") {
+            if let Some((album, artist)) = album_label(job) {
+                job.label = if artist.is_empty() {
+                    album
+                } else {
+                    format!("{album} - {artist}")
+                };
+            } else {
+                job.label = "Album download".to_string();
+            }
+            return;
+        }
+
+        if source_url.contains("/playlist/") {
+            job.label = "Playlist download".to_string();
+        }
     }
 
     fn terminal_detail_for_item(state: ItemState) -> &'static str {
@@ -1347,6 +1519,44 @@ fn now_ms() -> TimestampMs {
         .unwrap_or_default()
 }
 
+fn looks_like_spotify_url(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with("https://open.spotify.com/")
+        || trimmed.starts_with("spotify:")
+        || trimmed.starts_with("http://open.spotify.com/")
+}
+
+fn album_label(job: &JobRecord) -> Option<(String, String)> {
+    let album = job.items.iter().find_map(|item| {
+        let album = item.metadata.album.trim();
+        if album.is_empty() {
+            None
+        } else {
+            Some(album.to_string())
+        }
+    })?;
+
+    let artist = job
+        .items
+        .iter()
+        .find_map(|item| {
+            let artist = if item.metadata.album_artist.trim().is_empty() {
+                item.metadata.artist.trim()
+            } else {
+                item.metadata.album_artist.trim()
+            };
+
+            if artist.is_empty() {
+                None
+            } else {
+                Some(artist.to_string())
+            }
+        })
+        .unwrap_or_default();
+
+    Some((album, artist))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1362,7 +1572,7 @@ mod tests {
     use super::*;
     use spotifydl_core::{BackendCapabilities, BackendHealth};
     use spotifydl_protocol::{
-        BackendKind, BackoffState, IntegrityFlag, IntegritySeverity, OutputDisposition,
+        BackendKind, BackoffState, IntegrityFlag, IntegritySeverity, ItemMetadata, OutputDisposition,
         OutputRecord, ServiceCommand,
     };
 
@@ -1810,10 +2020,7 @@ mod tests {
             Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
                 executable: comspec,
                 working_directory: Some(temp_root.clone()),
-                base_args: vec![
-                    "/C".to_string(),
-                    script_path.to_string_lossy().to_string(),
-                ],
+                base_args: vec!["/C".to_string(), script_path.to_string_lossy().to_string()],
                 environment: Vec::new(),
             })),
         )
@@ -1830,11 +2037,13 @@ mod tests {
         dispatch_ok(&mut service, ServiceCommand::StartQueue);
         pump_ticks_until(
             &mut service,
-            |service| service
-                .snapshot()
-                .history
-                .iter()
-                .any(|entry| entry.job.id == job_id),
+            |service| {
+                service
+                    .snapshot()
+                    .history
+                    .iter()
+                    .any(|entry| entry.job.id == job_id)
+            },
             80,
         );
 
@@ -1878,9 +2087,11 @@ mod tests {
         );
 
         assert!(
-            service.snapshot().logs.iter().any(|entry| {
-                entry.message.contains("Launching external downloader:")
-            }),
+            service
+                .snapshot()
+                .logs
+                .iter()
+                .any(|entry| { entry.message.contains("Launching external downloader:") }),
             "expected launch log from external backend"
         );
 
@@ -1913,10 +2124,7 @@ mod tests {
             Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
                 executable: comspec,
                 working_directory: Some(temp_root.clone()),
-                base_args: vec![
-                    "/C".to_string(),
-                    script_path.to_string_lossy().to_string(),
-                ],
+                base_args: vec!["/C".to_string(), script_path.to_string_lossy().to_string()],
                 environment: Vec::new(),
             })),
         )
@@ -1948,7 +2156,10 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
 
-        assert!(saw_backoff, "expected queue to enter backoff during external run");
+        assert!(
+            saw_backoff,
+            "expected queue to enter backoff during external run"
+        );
 
         let history_job = service
             .snapshot()
@@ -1999,10 +2210,7 @@ mod tests {
             Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
                 executable: comspec,
                 working_directory: Some(temp_root.clone()),
-                base_args: vec![
-                    "/C".to_string(),
-                    script_path.to_string_lossy().to_string(),
-                ],
+                base_args: vec!["/C".to_string(), script_path.to_string_lossy().to_string()],
                 environment: Vec::new(),
             })),
         )
@@ -2055,7 +2263,9 @@ mod tests {
         );
         assert!(
             service.snapshot().logs.iter().any(|entry| {
-                entry.message.contains("External downloader exited with status Some(7)")
+                entry
+                    .message
+                    .contains("External downloader exited with status Some(7)")
             }),
             "expected exit-status log from external backend"
         );
@@ -2089,10 +2299,7 @@ mod tests {
             Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
                 executable: comspec,
                 working_directory: Some(temp_root.clone()),
-                base_args: vec![
-                    "/C".to_string(),
-                    script_path.to_string_lossy().to_string(),
-                ],
+                base_args: vec!["/C".to_string(), script_path.to_string_lossy().to_string()],
                 environment: Vec::new(),
             })),
         )
@@ -2133,15 +2340,19 @@ mod tests {
         assert_eq!(item.state, ItemState::Completed);
         assert_eq!(item.outputs.len(), 1);
         assert!(
-            service.snapshot().logs.iter().any(|entry| {
-                entry.message.contains("[stdout] not-json-output")
-            }),
+            service
+                .snapshot()
+                .logs
+                .iter()
+                .any(|entry| { entry.message.contains("[stdout] not-json-output") }),
             "expected malformed stdout line to be preserved in logs"
         );
         assert!(
-            service.snapshot().logs.iter().any(|entry| {
-                entry.message.contains("[stderr] stderr: transient warning")
-            }),
+            service
+                .snapshot()
+                .logs
+                .iter()
+                .any(|entry| { entry.message.contains("[stderr] stderr: transient warning") }),
             "expected stderr output to be preserved in logs"
         );
 
@@ -2175,10 +2386,7 @@ mod tests {
             Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
                 executable: comspec,
                 working_directory: Some(temp_root.clone()),
-                base_args: vec![
-                    "/C".to_string(),
-                    script_path.to_string_lossy().to_string(),
-                ],
+                base_args: vec!["/C".to_string(), script_path.to_string_lossy().to_string()],
                 environment: Vec::new(),
             })),
         )
@@ -2232,9 +2440,11 @@ mod tests {
         assert_eq!(item_2.state, ItemState::Completed);
         assert_eq!(item_2.outputs.len(), 1);
         assert!(
-            service.snapshot().logs.iter().any(|entry| {
-                entry.message.contains("Unmatched track_start event")
-            }),
+            service
+                .snapshot()
+                .logs
+                .iter()
+                .any(|entry| { entry.message.contains("Unmatched track_start event") }),
             "expected unmatched track event to be logged"
         );
 
@@ -2309,6 +2519,118 @@ mod tests {
             job.items[0].outputs[0].final_path,
             "C:/music/success-track.flac"
         );
+
+        drop(service);
+        let _ = fs::remove_file(&database_path);
+    }
+
+    #[test]
+    fn keeps_collection_progress_monotonic_across_track_boundaries() {
+        let (mut service, handle, database_path) = open_scripted_service();
+        let (job_id, item_ids) =
+            enqueue_urls(&mut service, &["https://open.spotify.com/album/demo-album"]);
+        let item_id = item_ids[0].clone();
+        let metadata = ItemMetadata {
+            artist: "Demo Artist".to_string(),
+            album: "Demo Album".to_string(),
+            title: "Track One".to_string(),
+            album_artist: "Demo Artist".to_string(),
+        };
+
+        handle.push_start(vec![
+            BackendEvent::JobStarted {
+                job_id: job_id.clone(),
+            },
+            BackendEvent::ItemStarted {
+                job_id: job_id.clone(),
+                item_id: item_id.clone(),
+                label: Some("Track One".to_string()),
+                metadata: Some(metadata.clone()),
+            },
+        ]);
+        handle.push_tick(vec![BackendEvent::ItemProgress {
+            job_id: job_id.clone(),
+            item_id: item_id.clone(),
+            progress: ProgressState::from_steps(50, 100, "downloading track one"),
+        }]);
+        handle.push_tick(vec![BackendEvent::ItemFinished {
+            job_id: job_id.clone(),
+            item_id: item_id.clone(),
+            state: ItemState::Completed,
+            failure_reason: None,
+        }]);
+        handle.push_tick(vec![BackendEvent::ItemStarted {
+            job_id: job_id.clone(),
+            item_id: item_id.clone(),
+            label: Some("Track Two".to_string()),
+            metadata: Some(ItemMetadata {
+                title: "Track Two".to_string(),
+                ..metadata.clone()
+            }),
+        }]);
+        handle.push_tick(vec![BackendEvent::ItemProgress {
+            job_id: job_id.clone(),
+            item_id: item_id.clone(),
+            progress: ProgressState::from_steps(50, 100, "downloading track two"),
+        }]);
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        let started_job = service
+            .snapshot()
+            .queue
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("started job");
+        assert_eq!(started_job.label, "Demo Album - Demo Artist");
+
+        dispatch_ok(&mut service, ServiceCommand::Tick);
+        let first_track_mid = service
+            .snapshot()
+            .queue
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("first track progress")
+            .progress
+            .percent;
+        assert_eq!(first_track_mid, 50);
+
+        dispatch_ok(&mut service, ServiceCommand::Tick);
+        let after_first_finish = service
+            .snapshot()
+            .queue
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("after first finish")
+            .progress
+            .percent;
+        assert_eq!(after_first_finish, 50);
+
+        dispatch_ok(&mut service, ServiceCommand::Tick);
+        let second_start = service
+            .snapshot()
+            .queue
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("second start")
+            .progress
+            .percent;
+        assert_eq!(second_start, 50);
+
+        dispatch_ok(&mut service, ServiceCommand::Tick);
+        let second_track_mid = service
+            .snapshot()
+            .queue
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .expect("second track progress")
+            .progress
+            .percent;
+        assert_eq!(second_track_mid, 75);
 
         drop(service);
         let _ = fs::remove_file(&database_path);

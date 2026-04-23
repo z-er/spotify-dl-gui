@@ -2,8 +2,7 @@ use std::{
     collections::HashSet,
     env,
     path::PathBuf,
-    process,
-    thread,
+    process, thread,
     time::{Duration, Instant},
 };
 
@@ -184,9 +183,9 @@ impl CliCommand {
                             let Some(value) = args.get(index + 1) else {
                                 return Err("--timeout-seconds requires a value".to_string());
                             };
-                            timeout_seconds = value.parse::<u64>().map_err(|_| {
-                                "--timeout-seconds must be an integer".to_string()
-                            })?;
+                            timeout_seconds = value
+                                .parse::<u64>()
+                                .map_err(|_| "--timeout-seconds must be an integer".to_string())?;
                             index += 2;
                         }
                         "--help" | "-h" => {

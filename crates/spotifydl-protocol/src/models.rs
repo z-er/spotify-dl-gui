@@ -380,6 +380,13 @@ pub enum BackendKind {
     External,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    Light,
+    #[default]
+    Dark,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -389,6 +396,7 @@ pub struct AppSettings {
     pub max_parallel: u16,
     pub max_history_entries: usize,
     pub max_log_entries: usize,
+    pub theme_mode: ThemeMode,
     pub preferred_backend: BackendKind,
     pub external_backend_executable: String,
 }
@@ -402,6 +410,7 @@ impl Default for AppSettings {
             max_parallel: 5,
             max_history_entries: 100,
             max_log_entries: 250,
+            theme_mode: ThemeMode::Dark,
             preferred_backend: BackendKind::Fake,
             external_backend_executable: String::new(),
         }
