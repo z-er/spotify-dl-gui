@@ -1,5 +1,6 @@
 mod external;
 mod fake;
+mod library;
 
 use spotifydl_protocol::{
     BackoffState, FailureReason, IntegrityFlag, ItemId, ItemMetadata, ItemState, JobId, JobOptions,
@@ -10,6 +11,10 @@ pub use external::{
     ExternalCommandSpec, ExternalDownloader, ExternalDownloaderConfig, ExternalDownloaderError,
 };
 pub use fake::FakeDownloader;
+pub use library::{
+    LibraryDownloader, LibraryDownloaderConfig, LibraryDownloaderError, UpstreamDiscovery,
+    UpstreamIntegrationSurface,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendHealth {

@@ -1572,8 +1572,8 @@ mod tests {
     use super::*;
     use spotifydl_core::{BackendCapabilities, BackendHealth};
     use spotifydl_protocol::{
-        BackendKind, BackoffState, IntegrityFlag, IntegritySeverity, ItemMetadata, OutputDisposition,
-        OutputRecord, ServiceCommand,
+        BackendKind, BackoffState, IntegrityFlag, IntegritySeverity, ItemMetadata,
+        OutputDisposition, OutputRecord, ServiceCommand,
     };
 
     #[derive(Default)]

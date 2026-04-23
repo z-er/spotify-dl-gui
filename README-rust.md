@@ -737,6 +737,32 @@ Deliverables:
   - retries/backoff/rate-limit events
   - output/failure information
 
+Phase 0 findings:
+- Upstream already exposes a library crate via `src/lib.rs`; the CLI binary is a thin wrapper over library calls.
+- The current binary flow is:
+  1. `spotify_dl::session::create_session`
+  2. `spotify_dl::track::get_tracks`
+  3. `spotify_dl::download::Downloader::download_tracks`
+- `track::get_tracks` already expands album and playlist URLs into a concrete `Vec<Track>` before download starts.
+- `Track::metadata()` already exposes track title, artist list, album name, album artist, duration, and position.
+- Playlist title is not currently surfaced by `track::get_tracks`; first-class playlist naming will likely require either:
+  - a small upstream extension
+  - or a direct librespot playlist metadata fetch in our library adapter
+
+Practical implication:
+- the future adapter should be split into two library-facing stages:
+  1. collection resolution and metadata enrichment before enqueue/start
+  2. download execution and event emission during transfer
+
+Current repository scaffold for this work:
+- `crates/spotifydl-core/src/library.rs`
+  - `LibraryDownloader`
+  - `LibraryDownloaderConfig`
+  - `UpstreamDiscovery`
+  - `UpstreamIntegrationSurface`
+
+This scaffold is intentionally non-operational today. It exists to lock in the discovered upstream entry points and keep the migration behind the existing `spotifydl-core` seam.
+
 #### Phase 1: Source strategy
 
 Choose one of these and document the decision:
