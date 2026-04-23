@@ -1,0 +1,11 @@
+[package]
+name = "spotifydl-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+spotifydl-protocol = { path = "../spotifydl-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

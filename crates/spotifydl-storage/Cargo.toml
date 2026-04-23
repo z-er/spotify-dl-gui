@@ -1,0 +1,12 @@
+[package]
+name = "spotifydl-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spotifydl-protocol = { path = "../spotifydl-protocol" }
+thiserror.workspace = true

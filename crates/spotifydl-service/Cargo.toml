@@ -1,0 +1,11 @@
+[package]
+name = "spotifydl-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+spotifydl-core = { path = "../spotifydl-core" }
+spotifydl-protocol = { path = "../spotifydl-protocol" }
+spotifydl-storage = { path = "../spotifydl-storage" }
+thiserror.workspace = true
