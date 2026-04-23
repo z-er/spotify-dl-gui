@@ -1,6 +1,8 @@
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -78,7 +80,7 @@ impl Default for RateLimitConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DownloadOptions {
     pub destination: PathBuf,
     pub parallel: usize,
@@ -86,6 +88,9 @@ pub struct DownloadOptions {
     pub force: bool,
     pub rate_limit: RateLimitConfig,
     pub json_events: bool,
+    pub event_sender: Option<Sender<DownloadEvent>>,
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+    pub pause_flag: Option<Arc<AtomicBool>>,
 }
 
 impl DownloadOptions {
@@ -99,6 +104,9 @@ impl DownloadOptions {
             force,
             rate_limit: RateLimitConfig::default(),
             json_events: false,
+            event_sender: None,
+            cancel_flag: None,
+            pause_flag: None,
         }
     }
 
@@ -109,6 +117,72 @@ impl DownloadOptions {
     pub fn enable_json_events(&mut self, enabled: bool) {
         self.json_events = enabled;
     }
+
+    pub fn set_event_sender(&mut self, sender: Sender<DownloadEvent>) {
+        self.event_sender = Some(sender);
+    }
+
+    pub fn set_cancel_flag(&mut self, cancel_flag: Arc<AtomicBool>) {
+        self.cancel_flag = Some(cancel_flag);
+    }
+
+    pub fn set_pause_flag(&mut self, pause_flag: Arc<AtomicBool>) {
+        self.pause_flag = Some(pause_flag);
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+}
+
+#[derive(Debug, Clone)]
+pub enum DownloadEvent {
+    TrackStart {
+        track_id: String,
+        track_label: String,
+    },
+    Stage {
+        track_id: String,
+        track_label: String,
+        stage: String,
+        status: String,
+        progress: f64,
+    },
+    Retry {
+        track_id: String,
+        track_label: String,
+        stage: String,
+        attempt: usize,
+        max_attempts: usize,
+    },
+    TrackFailed {
+        track_id: String,
+        track_label: String,
+        reason: String,
+    },
+    TrackSkipped {
+        track_id: String,
+        track_label: String,
+    },
+    TrackComplete {
+        track_id: String,
+        track_label: String,
+        path: String,
+    },
+    RateLimitBackoff {
+        track_id: String,
+        track_label: String,
+        delay_ms: u64,
+        reason: String,
+    },
+    RateLimitWait {
+        track_id: String,
+        track_label: String,
+        waited_ms: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -125,9 +199,13 @@ impl RateLimiter {
         }
     }
 
-    async fn wait_ready(&self) -> Option<Duration> {
+    async fn wait_ready(
+        &self,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        pause_flag: Option<&Arc<AtomicBool>>,
+    ) -> Result<Option<Duration>> {
         if !self.config.is_enabled() {
-            return None;
+            return Ok(None);
         }
 
         let mut waited = Duration::ZERO;
@@ -150,15 +228,18 @@ impl RateLimiter {
 
             match sleep_duration {
                 Some(duration) if !duration.is_zero() => {
-                    sleep(duration).await;
-                    waited += duration;
+                    waited += sleep_with_control_state(cancel_flag, pause_flag, duration).await?;
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
 
-        if waited.is_zero() { None } else { Some(waited) }
+        if waited.is_zero() {
+            Ok(None)
+        } else {
+            Ok(Some(waited))
+        }
     }
 
     async fn on_failure(&self) -> Duration {
@@ -228,11 +309,21 @@ struct RateLimiterState {
 #[derive(Debug, Clone)]
 struct EventEmitter {
     enabled: bool,
+    event_sender: Option<Sender<DownloadEvent>>,
 }
 
 impl EventEmitter {
-    fn new(enabled: bool) -> Self {
-        EventEmitter { enabled }
+    fn new(enabled: bool, event_sender: Option<Sender<DownloadEvent>>) -> Self {
+        EventEmitter {
+            enabled,
+            event_sender,
+        }
+    }
+
+    fn emit_structured(&self, event: DownloadEvent) {
+        if let Some(sender) = &self.event_sender {
+            let _ = sender.send(event);
+        }
     }
 
     fn emit(&self, kind: &str, fields: &[EventField<'_>]) {
@@ -282,6 +373,13 @@ impl EventEmitter {
         track_label: &str,
     ) {
         let progress = progress.clamp(0.0, 100.0);
+        self.emit_structured(DownloadEvent::Stage {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+            stage: stage.to_string(),
+            status: status.to_string(),
+            progress,
+        });
         let fields = [
             EventField::str("stage", stage),
             EventField::str("status", status),
@@ -298,6 +396,13 @@ impl EventEmitter {
         attempt: usize,
         max_attempts: usize,
     ) {
+        self.emit_structured(DownloadEvent::Retry {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+            stage: stage.to_string(),
+            attempt,
+            max_attempts,
+        });
         let fields = [
             EventField::str("stage", stage),
             EventField::int("attempt", attempt as i64),
@@ -307,24 +412,48 @@ impl EventEmitter {
     }
 
     fn emit_failure(&self, track_id: &str, track_label: &str, reason: &str) {
+        self.emit_structured(DownloadEvent::TrackFailed {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+            reason: reason.to_string(),
+        });
         let fields = [EventField::str("reason", reason)];
         self.emit_track_event("track_failed", track_id, track_label, &fields);
     }
 
     fn emit_skip(&self, track_id: &str, track_label: &str) {
+        self.emit_structured(DownloadEvent::TrackSkipped {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+        });
         self.emit_track_event("track_skipped", track_id, track_label, &[]);
     }
 
     fn emit_start(&self, track_id: &str, track_label: &str) {
+        self.emit_structured(DownloadEvent::TrackStart {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+        });
         self.emit_track_event("track_start", track_id, track_label, &[]);
     }
 
     fn emit_complete(&self, track_id: &str, track_label: &str, path: &str) {
+        self.emit_structured(DownloadEvent::TrackComplete {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+            path: path.to_string(),
+        });
         let fields = [EventField::str("path", path)];
         self.emit_track_event("track_complete", track_id, track_label, &fields);
     }
 
     fn emit_backoff(&self, track_id: &str, track_label: &str, delay_ms: u64, reason: &str) {
+        self.emit_structured(DownloadEvent::RateLimitBackoff {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+            delay_ms,
+            reason: reason.to_string(),
+        });
         let fields = [
             EventField::int("delay_ms", delay_ms as i64),
             EventField::str("reason", reason),
@@ -333,6 +462,11 @@ impl EventEmitter {
     }
 
     fn emit_wait(&self, track_id: &str, track_label: &str, waited_ms: u64) {
+        self.emit_structured(DownloadEvent::RateLimitWait {
+            track_id: track_id.to_string(),
+            track_label: track_label.to_string(),
+            waited_ms,
+        });
         let fields = [EventField::int("waited_ms", waited_ms as i64)];
         self.emit_track_event("rate_limit_wait", track_id, track_label, &fields);
     }
@@ -416,6 +550,81 @@ fn json_escape(input: &str) -> String {
     escaped
 }
 
+#[derive(Debug)]
+struct DownloadCancelled;
+
+impl std::fmt::Display for DownloadCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("download cancelled")
+    }
+}
+
+impl std::error::Error for DownloadCancelled {}
+
+fn cancellation_error() -> anyhow::Error {
+    DownloadCancelled.into()
+}
+
+fn is_cancellation_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<DownloadCancelled>().is_some()
+}
+
+fn cancellation_requested(cancel_flag: Option<&Arc<AtomicBool>>) -> bool {
+    cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+fn pause_requested(pause_flag: Option<&Arc<AtomicBool>>) -> bool {
+    pause_flag.is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+fn ensure_not_cancelled(options: &DownloadOptions) -> Result<()> {
+    if options.cancellation_requested() {
+        Err(cancellation_error())
+    } else {
+        Ok(())
+    }
+}
+
+async fn wait_if_paused(
+    cancel_flag: Option<&Arc<AtomicBool>>,
+    pause_flag: Option<&Arc<AtomicBool>>,
+) -> Result<()> {
+    while pause_requested(pause_flag) {
+        if cancellation_requested(cancel_flag) {
+            return Err(cancellation_error());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    if cancellation_requested(cancel_flag) {
+        return Err(cancellation_error());
+    }
+
+    Ok(())
+}
+
+async fn sleep_with_control_state(
+    cancel_flag: Option<&Arc<AtomicBool>>,
+    pause_flag: Option<&Arc<AtomicBool>>,
+    duration: Duration,
+) -> Result<Duration> {
+    let mut waited = Duration::ZERO;
+    let chunk = Duration::from_millis(200);
+
+    while waited < duration {
+        wait_if_paused(cancel_flag, pause_flag).await?;
+
+        let remaining = duration.saturating_sub(waited);
+        let next = remaining.min(chunk);
+        sleep(next).await;
+        waited += next;
+    }
+
+    wait_if_paused(cancel_flag, pause_flag).await?;
+
+    Ok(waited)
+}
+
 impl Downloader {
     pub fn new(session: Session) -> Self {
         Downloader {
@@ -429,8 +638,13 @@ impl Downloader {
         tracks: Vec<Track>,
         options: &DownloadOptions,
     ) -> Result<()> {
+        ensure_not_cancelled(options)?;
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
         let rate_limiter = Arc::new(RateLimiter::new(options.rate_limit.clone()));
-        let event_emitter = Arc::new(EventEmitter::new(options.json_events));
+        let event_emitter = Arc::new(EventEmitter::new(
+            options.json_events,
+            options.event_sender.clone(),
+        ));
 
         futures::stream::iter(tracks)
             .map(|track| {
@@ -459,11 +673,17 @@ impl Downloader {
         rate_limiter: Arc<RateLimiter>,
         event_emitter: Arc<EventEmitter>,
     ) -> Result<()> {
+        ensure_not_cancelled(options)?;
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
         let track_id = track.id.to_id().unwrap_or_else(|_| track.id.to_string());
 
-        let waited = rate_limiter.wait_ready().await;
+        let waited = rate_limiter
+            .wait_ready(options.cancel_flag.as_ref(), options.pause_flag.as_ref())
+            .await?;
 
         let metadata = track.metadata(&self.session).await?;
+        ensure_not_cancelled(options)?;
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
         let track_label = metadata.to_string();
         if let Some(waited) = waited {
             if waited > Duration::ZERO {
@@ -490,6 +710,8 @@ impl Downloader {
             return Ok(());
         }
 
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
+        ensure_not_cancelled(options)?;
         event_emitter.emit_start(&track_id, &track_label);
 
         let pb = self.add_progress_bar(&metadata);
@@ -509,8 +731,10 @@ impl Downloader {
                     &track_id,
                     &event_emitter,
                     &reason,
+                    options.cancel_flag.as_ref(),
+                    options.pause_flag.as_ref(),
                 )
-                .await;
+                .await?;
                 return Ok(());
             }
         };
@@ -523,11 +747,17 @@ impl Downloader {
                 &event_emitter,
                 &track_label,
                 &track_id,
+                options.cancel_flag.as_ref(),
+                options.pause_flag.as_ref(),
             )
             .await
         {
             Ok(samples) => samples,
             Err(e) => {
+                if is_cancellation_error(&e) {
+                    self.finish_cancelled(&pb, &track_label);
+                    return Err(e);
+                }
                 let reason = e.to_string();
                 self.fail_with_error(&pb, &track_label, reason.clone());
                 event_emitter.emit_failure(&track_id, &track_label, &reason);
@@ -537,12 +767,16 @@ impl Downloader {
                     &track_id,
                     &event_emitter,
                     &reason,
+                    options.cancel_flag.as_ref(),
+                    options.pause_flag.as_ref(),
                 )
-                .await;
+                .await?;
                 return Ok(());
             }
         };
 
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
+        ensure_not_cancelled(options)?;
         event_emitter.emit_stage("downloading", "complete", 100.0, &track_id, &track_label);
 
         tracing::info!("Encoding track: {}", track_label);
@@ -551,6 +785,8 @@ impl Downloader {
 
         let encoder = crate::encoder::get_encoder(options.format);
         let stream = encoder.encode(samples).await?;
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
+        ensure_not_cancelled(options)?;
 
         event_emitter.emit_stage("encoding", "complete", 100.0, &track_id, &track_label);
 
@@ -558,12 +794,16 @@ impl Downloader {
         tracing::info!("Writing track: {:?} to file: {}", track_label, &path);
         event_emitter.emit_stage("writing", "start", 0.0, &track_id, &track_label);
         stream.write_to_file(&path).await?;
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
+        ensure_not_cancelled(options)?;
         event_emitter.emit_stage("writing", "complete", 100.0, &track_id, &track_label);
 
         event_emitter.emit_stage("tagging", "start", 0.0, &track_id, &track_label);
         let tags = metadata.tags().await?;
         let output_path = path.clone();
         encoder::tags::store_tags(path, &tags, options.format).await?;
+        wait_if_paused(options.cancel_flag.as_ref(), options.pause_flag.as_ref()).await?;
+        ensure_not_cancelled(options)?;
         event_emitter.emit_stage("tagging", "complete", 100.0, &track_id, &track_label);
 
         pb.finish_with_message(format!("Downloaded {}", track_label));
@@ -594,10 +834,24 @@ impl Downloader {
         event_emitter: &EventEmitter,
         track_label: &str,
         track_id: &str,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        pause_flag: Option<&Arc<AtomicBool>>,
     ) -> Result<Samples> {
         let mut samples = Vec::<i32>::new();
         let mut last_reported = 0.0_f64;
-        while let Some(event) = rx.recv().await {
+        loop {
+            wait_if_paused(cancel_flag, pause_flag).await?;
+            let Some(event) = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .ok()
+                .flatten()
+            else {
+                if cancellation_requested(cancel_flag) {
+                    return Err(cancellation_error());
+                }
+                continue;
+            };
+            wait_if_paused(cancel_flag, pause_flag).await?;
             match event {
                 StreamEvent::Write {
                     bytes,
@@ -683,6 +937,14 @@ impl Downloader {
         );
     }
 
+    fn finish_cancelled(&self, pb: &ProgressBar, name: &str) {
+        pb.finish_with_message(
+            console::style(format!("Cancelled {}", name))
+                .yellow()
+                .to_string(),
+        );
+    }
+
     async fn backoff_after_failure(
         &self,
         rate_limiter: &RateLimiter,
@@ -690,10 +952,12 @@ impl Downloader {
         track_id: &str,
         event_emitter: &EventEmitter,
         reason: &str,
-    ) {
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        pause_flag: Option<&Arc<AtomicBool>>,
+    ) -> Result<()> {
         let delay = rate_limiter.on_failure().await;
         if delay.is_zero() {
-            return;
+            return Ok(());
         }
 
         let delay_ms = delay.as_millis() as u64;
@@ -711,6 +975,7 @@ impl Downloader {
         );
         let _ = self.progress_bar.println(message);
 
-        sleep(delay).await;
+        let _ = sleep_with_control_state(cancel_flag, pause_flag, delay).await?;
+        Ok(())
     }
 }

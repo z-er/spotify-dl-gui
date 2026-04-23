@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-spotifydl-core = { path = "../spotifydl-core" }
+spotifydl-core = { path = "../spotifydl-core", features = ["vendored-upstream"] }
 spotifydl-protocol = { path = "../spotifydl-protocol" }
 spotifydl-storage = { path = "../spotifydl-storage" }
 thiserror.workspace = true

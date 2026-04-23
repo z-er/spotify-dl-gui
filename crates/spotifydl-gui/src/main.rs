@@ -430,13 +430,20 @@ fn settings_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     let backend_row = row![
         backend_button("Fake", BackendKind::Fake, app.selected_backend),
         backend_button("External", BackendKind::External, app.selected_backend),
+        backend_button("Library", BackendKind::Library, app.selected_backend),
     ]
     .spacing(10);
 
-    let helper_text = if app.selected_backend == BackendKind::External {
-        "Choose where the downloader lives. Leave it blank to use a bundled `spotify-dl` next to the app when available."
-    } else {
-        "Use the fake backend only for testing the app without downloading files."
+    let helper_text = match app.selected_backend {
+        BackendKind::External => {
+            "Choose where the downloader lives. Leave it blank to use a bundled `spotify-dl` next to the app when available."
+        }
+        BackendKind::Library => {
+            "Use the vendored in-process downloader path. This is the deeper integration track and may still have rough edges."
+        }
+        BackendKind::Fake => {
+            "Use the fake backend only for testing the app without downloading files."
+        }
     };
 
     let settings_dirty = settings_dirty(app);
@@ -611,6 +618,12 @@ fn queue_list(app: &SpotifydlGuiApp) -> Element<'_, Message> {
         ]
         .spacing(12);
 
+        let progress_section = if let Some(stage) = queue_progress_stage(&app.snapshot, job) {
+            column![status_chip(stage, ChipTone::Accent), progress_row,].spacing(8)
+        } else {
+            column![progress_row].spacing(8)
+        };
+
         let issue_panel = issue_summary.map(|summary| {
             container(column![text("Needs attention").size(13), text(summary).size(13),].spacing(4))
                 .style(soft_card_style)
@@ -626,7 +639,7 @@ fn queue_list(app: &SpotifydlGuiApp) -> Element<'_, Message> {
                 actions,
             ]
             .spacing(12),
-            progress_row,
+            progress_section,
         ]
         .spacing(10);
 
@@ -998,7 +1011,7 @@ impl<'a> SelectedJobView<'a> {
 
     fn original_inputs(&self) -> &'a [String] {
         match self {
-            Self::Queue { .. } => &[],
+            Self::Queue { job } => &job.original_inputs,
             Self::History { entry } => &entry.original_inputs,
         }
     }
@@ -1097,6 +1110,49 @@ fn queue_progress_caption(snapshot: &AppSnapshot, job: &JobRecord) -> String {
         spotifydl_protocol::JobState::Completed => "Done".to_string(),
         spotifydl_protocol::JobState::Failed => "Issue found".to_string(),
         spotifydl_protocol::JobState::Cancelled => "Cancelled".to_string(),
+    }
+}
+
+fn queue_progress_stage(snapshot: &AppSnapshot, job: &JobRecord) -> Option<String> {
+    if snapshot.queue.active_job_id.as_ref() == Some(&job.id)
+        && snapshot.queue.status == QueueStatus::Backoff
+    {
+        return Some("Waiting briefly".to_string());
+    }
+
+    if job.state != spotifydl_protocol::JobState::Running {
+        return None;
+    }
+
+    let stage = compact_progress_stage(&job.progress.detail);
+    if stage.is_empty() { None } else { Some(stage) }
+}
+
+fn compact_progress_stage(detail: &str) -> String {
+    let head = detail
+        .split('|')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match head.as_str() {
+        "" => String::new(),
+        "downloading" => "Downloading".to_string(),
+        "encoding" => "Encoding".to_string(),
+        "writing" => "Writing".to_string(),
+        "tagging" => "Tagging".to_string(),
+        "processing" => "Processing".to_string(),
+        "backend started item" | "waiting for backend events" | "waiting for downloader" => {
+            "Preparing".to_string()
+        }
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        }
     }
 }
 

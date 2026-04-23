@@ -12,8 +12,8 @@ pub use external::{
 };
 pub use fake::FakeDownloader;
 pub use library::{
-    LibraryDownloader, LibraryDownloaderConfig, LibraryDownloaderError, UpstreamDiscovery,
-    UpstreamIntegrationSurface,
+    LibraryDownloader, LibraryDownloaderConfig, LibraryDownloaderError, ResolvedCollection,
+    ResolvedCollectionItem, ResolvedCollectionKind, UpstreamDiscovery, UpstreamIntegrationSurface,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

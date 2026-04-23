@@ -6,11 +6,12 @@ license.workspace = true
 
 [features]
 default = []
-vendored-upstream = ["dep:upstream_spotify_dl"]
+vendored-upstream = ["dep:tokio", "dep:upstream_spotify_dl"]
 
 [dependencies]
 spotifydl-protocol = { path = "../spotifydl-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { version = "1", features = ["full"], optional = true }
 upstream_spotify_dl = { package = "spotify-dl", path = "../../vendor/spotify-dl", optional = true }

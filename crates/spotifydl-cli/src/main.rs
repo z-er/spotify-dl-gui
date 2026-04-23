@@ -38,7 +38,18 @@ fn main() {
             urls,
             destination,
             timeout_seconds,
-        } => run_urls(database_path, urls, destination, timeout_seconds),
+            cancel_after_seconds,
+            pause_after_seconds,
+            resume_after_seconds,
+        } => run_urls(
+            database_path,
+            urls,
+            destination,
+            timeout_seconds,
+            cancel_after_seconds,
+            pause_after_seconds,
+            resume_after_seconds,
+        ),
     }
 }
 
@@ -59,6 +70,9 @@ enum CliCommand {
         urls: Vec<String>,
         destination: Option<String>,
         timeout_seconds: u64,
+        cancel_after_seconds: Option<u64>,
+        pause_after_seconds: Option<u64>,
+        resume_after_seconds: Option<u64>,
     },
 }
 
@@ -161,6 +175,9 @@ impl CliCommand {
                 let mut database_path = None;
                 let mut destination = None;
                 let mut timeout_seconds = 180u64;
+                let mut cancel_after_seconds = None;
+                let mut pause_after_seconds = None;
+                let mut resume_after_seconds = None;
                 let mut urls = Vec::new();
 
                 while index < args.len() {
@@ -188,6 +205,45 @@ impl CliCommand {
                                 .map_err(|_| "--timeout-seconds must be an integer".to_string())?;
                             index += 2;
                         }
+                        "--cancel-after-seconds" => {
+                            let Some(value) = args.get(index + 1) else {
+                                return Err("--cancel-after-seconds requires a value".to_string());
+                            };
+                            cancel_after_seconds = Some(
+                                value
+                                    .parse::<u64>()
+                                    .map_err(|_| {
+                                        "--cancel-after-seconds must be an integer".to_string()
+                                    })?,
+                            );
+                            index += 2;
+                        }
+                        "--pause-after-seconds" => {
+                            let Some(value) = args.get(index + 1) else {
+                                return Err("--pause-after-seconds requires a value".to_string());
+                            };
+                            pause_after_seconds = Some(
+                                value
+                                    .parse::<u64>()
+                                    .map_err(|_| {
+                                        "--pause-after-seconds must be an integer".to_string()
+                                    })?,
+                            );
+                            index += 2;
+                        }
+                        "--resume-after-seconds" => {
+                            let Some(value) = args.get(index + 1) else {
+                                return Err("--resume-after-seconds requires a value".to_string());
+                            };
+                            resume_after_seconds = Some(
+                                value
+                                    .parse::<u64>()
+                                    .map_err(|_| {
+                                        "--resume-after-seconds must be an integer".to_string()
+                                    })?,
+                            );
+                            index += 2;
+                        }
                         "--help" | "-h" => {
                             print_usage();
                             process::exit(0);
@@ -211,6 +267,9 @@ impl CliCommand {
                     urls,
                     destination,
                     timeout_seconds,
+                    cancel_after_seconds,
+                    pause_after_seconds,
+                    resume_after_seconds,
                 })
             }
             other => Err(format!("unrecognized command: {other}")),
@@ -338,6 +397,9 @@ fn run_urls(
     urls: Vec<String>,
     destination: Option<String>,
     timeout_seconds: u64,
+    cancel_after_seconds: Option<u64>,
+    pause_after_seconds: Option<u64>,
+    resume_after_seconds: Option<u64>,
 ) {
     let database_path = database_path.unwrap_or_else(default_database_path);
     let mut service = open_service_or_exit(&database_path);
@@ -384,6 +446,16 @@ fn run_urls(
     }
 
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
+    let cancel_deadline = cancel_after_seconds
+        .map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
+    let pause_deadline =
+        pause_after_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
+    let resume_deadline =
+        resume_after_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
+    let mut cancel_requested = false;
+    let mut pause_requested = false;
+    let mut resume_requested = false;
+    let mut cancelled_job_ids = HashSet::new();
     while Instant::now() < deadline {
         let all_in_history = queued_job_ids.iter().all(|job_id| {
             service
@@ -394,6 +466,53 @@ fn run_urls(
         });
         if all_in_history {
             break;
+        }
+
+        if !pause_requested
+            && pause_deadline.is_some_and(|pause_deadline| Instant::now() >= pause_deadline)
+        {
+            if let Err(error) = service.dispatch(ServiceCommand::PauseQueue) {
+                eprintln!(
+                    "failed to pause queue at {}: {error}",
+                    database_path.display()
+                );
+                process::exit(1);
+            }
+            pause_requested = true;
+        }
+
+        if pause_requested
+            && !resume_requested
+            && resume_deadline.is_some_and(|resume_deadline| Instant::now() >= resume_deadline)
+        {
+            if let Err(error) = service.dispatch(ServiceCommand::ResumeQueue) {
+                eprintln!(
+                    "failed to resume queue at {}: {error}",
+                    database_path.display()
+                );
+                process::exit(1);
+            }
+            resume_requested = true;
+        }
+
+        if !cancel_requested
+            && cancel_deadline.is_some_and(|cancel_deadline| Instant::now() >= cancel_deadline)
+        {
+            if let Some(active_job_id) = service.snapshot().queue.active_job_id.clone() {
+                if queued_job_ids.iter().any(|job_id| job_id == &active_job_id) {
+                    if let Err(error) =
+                        service.dispatch(ServiceCommand::CancelJob { job_id: active_job_id.clone() })
+                    {
+                        eprintln!(
+                            "failed to cancel active job at {}: {error}",
+                            database_path.display()
+                        );
+                        process::exit(1);
+                    }
+                    cancelled_job_ids.insert(active_job_id);
+                    cancel_requested = true;
+                }
+            }
         }
 
         if let Err(error) = service.dispatch(ServiceCommand::Tick) {
@@ -446,7 +565,18 @@ fn run_urls(
         println!("---");
     }
 
-    if history_jobs
+    if cancel_requested {
+        let cancelled_count = history_jobs
+            .iter()
+            .filter(|entry| {
+                cancelled_job_ids.contains(&entry.job.id) && entry.job.state == JobState::Cancelled
+            })
+            .count();
+        if cancelled_count == 0 {
+            eprintln!("cancel was requested, but no targeted job finished as cancelled");
+            process::exit(5);
+        }
+    } else if history_jobs
         .iter()
         .any(|entry| entry.job.state != JobState::Completed)
     {
@@ -472,8 +602,9 @@ fn parse_backend_kind(value: &str) -> Result<BackendKind, String> {
     match value.to_ascii_lowercase().as_str() {
         "fake" => Ok(BackendKind::Fake),
         "external" => Ok(BackendKind::External),
+        "library" => Ok(BackendKind::Library),
         other => Err(format!(
-            "unsupported backend `{other}`; expected `fake` or `external`"
+            "unsupported backend `{other}`; expected `fake`, `external`, or `library`"
         )),
     }
 }
@@ -511,10 +642,10 @@ fn print_usage() {
         "  cargo run -p spotifydl-cli -- status [--json] [--require-ready] [--database PATH]"
     );
     eprintln!(
-        "  cargo run -p spotifydl-cli -- configure-backend --backend <fake|external> [--executable PATH] [--database PATH]"
+        "  cargo run -p spotifydl-cli -- configure-backend --backend <fake|external|library> [--executable PATH] [--database PATH]"
     );
     eprintln!(
-        "  cargo run -p spotifydl-cli -- run-urls [--database PATH] [--destination PATH] [--timeout-seconds N] <spotify-url>..."
+        "  cargo run -p spotifydl-cli -- run-urls [--database PATH] [--destination PATH] [--timeout-seconds N] [--pause-after-seconds N] [--resume-after-seconds N] [--cancel-after-seconds N] <spotify-url>..."
     );
 }
 
@@ -583,6 +714,7 @@ mod tests {
     fn parses_backend_kind() {
         assert_eq!(parse_backend_kind("fake"), Ok(BackendKind::Fake));
         assert_eq!(parse_backend_kind("external"), Ok(BackendKind::External));
+        assert_eq!(parse_backend_kind("library"), Ok(BackendKind::Library));
         assert!(parse_backend_kind("invalid").is_err());
     }
 
@@ -611,6 +743,59 @@ mod tests {
                 ],
                 destination: Some("C:/music".to_string()),
                 timeout_seconds: 90,
+                cancel_after_seconds: None,
+                pause_after_seconds: None,
+                resume_after_seconds: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_run_urls_cancel_flag() {
+        let args = vec![
+            "run-urls".to_string(),
+            "--cancel-after-seconds".to_string(),
+            "12".to_string(),
+            "https://open.spotify.com/album/abc".to_string(),
+        ];
+
+        let command = CliCommand::parse(&args).expect("run-urls cancel args should parse");
+        assert_eq!(
+            command,
+            CliCommand::RunUrls {
+                database_path: None,
+                urls: vec!["https://open.spotify.com/album/abc".to_string()],
+                destination: None,
+                timeout_seconds: 180,
+                cancel_after_seconds: Some(12),
+                pause_after_seconds: None,
+                resume_after_seconds: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_run_urls_pause_and_resume_flags() {
+        let args = vec![
+            "run-urls".to_string(),
+            "--pause-after-seconds".to_string(),
+            "5".to_string(),
+            "--resume-after-seconds".to_string(),
+            "9".to_string(),
+            "https://open.spotify.com/album/abc".to_string(),
+        ];
+
+        let command = CliCommand::parse(&args).expect("run-urls pause/resume args should parse");
+        assert_eq!(
+            command,
+            CliCommand::RunUrls {
+                database_path: None,
+                urls: vec!["https://open.spotify.com/album/abc".to_string()],
+                destination: None,
+                timeout_seconds: 180,
+                cancel_after_seconds: None,
+                pause_after_seconds: Some(5),
+                resume_after_seconds: Some(9),
             }
         );
     }

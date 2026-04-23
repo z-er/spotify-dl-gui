@@ -72,20 +72,22 @@ else {
     $DownloaderBinary = Resolve-RepoPath $DownloaderBinary
 }
 
-if ([string]::IsNullOrWhiteSpace($DownloaderBinary)) {
-    throw "Downloader binary was not provided and no default spotify-dl.exe candidate was found."
-}
-
 $downloaderDestination = Join-Path $packageRoot "spotify-dl.exe"
-Copy-BinaryIfPresent -SourcePath $DownloaderBinary -DestinationPath $downloaderDestination -Label "Downloader binary"
+if ([string]::IsNullOrWhiteSpace($DownloaderBinary)) {
+    Write-Host "No external downloader binary found; validating packaged app with the Library backend only."
+    $downloaderDestination = $null
+}
+else {
+    Copy-BinaryIfPresent -SourcePath $DownloaderBinary -DestinationPath $downloaderDestination -Label "Downloader binary"
+}
 
 $validationDatabase = Join-Path $packageRoot "validation.sqlite"
 if (Test-Path -LiteralPath $validationDatabase) {
     Remove-Item -LiteralPath $validationDatabase -Force
 }
 
-Write-Host "Configuring packaged CLI to use the external backend..."
-& $cliDestination "configure-backend" "--database" $validationDatabase "--backend" "external"
+Write-Host "Configuring packaged CLI to use the library backend..."
+& $cliDestination "configure-backend" "--database" $validationDatabase "--backend" "library"
 if ($LASTEXITCODE -ne 0) {
     throw "Packaged CLI backend configuration failed with exit code $LASTEXITCODE."
 }
@@ -108,5 +110,10 @@ Write-Host "  CLI: $cliDestination"
 if (-not $SkipGuiCopy) {
     Write-Host "  GUI: $(Join-Path $packageRoot 'spotifydl-gui.exe')"
 }
-Write-Host "  Downloader: $downloaderDestination"
+if ($downloaderDestination) {
+    Write-Host "  Downloader: $downloaderDestination"
+}
+else {
+    Write-Host "  Downloader: (not staged; library backend validated)"
+}
 Write-Host "  Validation DB: $validationDatabase"

@@ -60,6 +60,7 @@ impl SqliteStore {
                 source_kind TEXT NOT NULL,
                 source_summary TEXT NOT NULL,
                 source_url TEXT NOT NULL,
+                original_inputs_json TEXT NOT NULL DEFAULT '[]',
                 state TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL,
@@ -184,6 +185,7 @@ impl SqliteStore {
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
             params![1_i64, now_ms()],
         )?;
+        ensure_text_column(&conn, "queue_jobs", "original_inputs_json", "'[]'")?;
 
         Ok(Self { conn })
     }
@@ -279,10 +281,10 @@ impl SqliteStore {
         tx.execute(
             r#"
             INSERT INTO queue_jobs (
-                job_id, position, label, source_kind, source_summary, source_url, state,
-                created_at_ms, updated_at_ms, started_at_ms, finished_at_ms, error_message,
-                options_json, totals_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                job_id, position, label, source_kind, source_summary, source_url,
+                original_inputs_json, state, created_at_ms, updated_at_ms, started_at_ms,
+                finished_at_ms, error_message, options_json, totals_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
             params![
                 job.id.0,
@@ -291,6 +293,7 @@ impl SqliteStore {
                 to_json(&job.source.kind)?,
                 job.source.summary,
                 job.source_url,
+                to_json(&job.original_inputs)?,
                 to_json(&job.state)?,
                 job.created_at_ms,
                 job.updated_at_ms,
@@ -447,9 +450,9 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
-                job_id, position, label, source_kind, source_summary, source_url, state,
-                created_at_ms, updated_at_ms, started_at_ms, finished_at_ms, error_message,
-                options_json, totals_json
+                job_id, position, label, source_kind, source_summary, source_url,
+                original_inputs_json, state, created_at_ms, updated_at_ms, started_at_ms,
+                finished_at_ms, error_message, options_json, totals_json
             FROM queue_jobs
             ORDER BY position ASC
             "#,
@@ -464,13 +467,14 @@ impl SqliteStore {
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)?,
+                row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
-                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, i64>(9)?,
                 row.get::<_, Option<i64>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, String>(12)?,
+                row.get::<_, Option<i64>>(11)?,
+                row.get::<_, Option<String>>(12)?,
                 row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
             ))
         })?;
 
@@ -483,6 +487,7 @@ impl SqliteStore {
                 source_kind,
                 source_summary,
                 source_url,
+                original_inputs_json,
                 state,
                 created_at_ms,
                 updated_at_ms,
@@ -494,9 +499,16 @@ impl SqliteStore {
             ) = row?;
 
             let job_id = JobId(job_id);
+            let original_inputs: Vec<String> = from_json(&original_inputs_json)?;
+            let fallback_input = source_url.clone();
             jobs.push(JobRecord {
                 id: job_id.clone(),
                 source_url,
+                original_inputs: if original_inputs.is_empty() {
+                    vec![fallback_input]
+                } else {
+                    original_inputs
+                },
                 source: JobSource {
                     kind: from_json(&source_kind)?,
                     summary: source_summary,
@@ -572,11 +584,13 @@ impl SqliteStore {
             ) = row?;
 
             let job_id = JobId(job_id);
+            let original_inputs: Vec<String> = from_json(&original_inputs_json)?;
             history.push(HistoryEntry {
-                original_inputs: from_json(&original_inputs_json)?,
+                original_inputs: original_inputs.clone(),
                 job: JobRecord {
                     id: job_id.clone(),
                     source_url,
+                    original_inputs,
                     source: JobSource {
                         kind: from_json(&source_kind)?,
                         summary: source_summary,
@@ -1018,4 +1032,26 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
+}
+
+fn ensure_text_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    default_sql: &str,
+) -> StorageResult<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+    for row in rows {
+        if row? == column {
+            return Ok(());
+        }
+    }
+
+    let alter =
+        format!("ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT {default_sql}");
+    conn.execute(&alter, [])?;
+    Ok(())
 }

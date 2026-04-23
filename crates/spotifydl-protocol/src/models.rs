@@ -260,6 +260,7 @@ pub struct DownloadItem {
 pub struct JobRecord {
     pub id: JobId,
     pub source_url: String,
+    pub original_inputs: Vec<String>,
     pub source: JobSource,
     pub label: String,
     pub state: JobState,
@@ -282,6 +283,7 @@ impl JobRecord {
         Self {
             id: JobId::new(),
             source_url: source_url.clone(),
+            original_inputs: vec![source_url.clone()],
             source: JobSource {
                 kind: JobSourceKind::Manual,
                 summary: source_url.clone(),
@@ -378,6 +380,7 @@ pub enum BackendKind {
     #[default]
     Fake,
     External,
+    Library,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -411,7 +414,7 @@ impl Default for AppSettings {
             max_history_entries: 100,
             max_log_entries: 250,
             theme_mode: ThemeMode::Dark,
-            preferred_backend: BackendKind::Fake,
+            preferred_backend: BackendKind::Library,
             external_backend_executable: String::new(),
         }
     }
@@ -426,7 +429,9 @@ pub struct HistoryEntry {
 
 impl HistoryEntry {
     pub fn from_job(job: JobRecord) -> Self {
-        let original_inputs = if job.items.is_empty() {
+        let original_inputs = if !job.original_inputs.is_empty() {
+            job.original_inputs.clone()
+        } else if job.items.is_empty() {
             vec![job.source_url.clone()]
         } else {
             job.items

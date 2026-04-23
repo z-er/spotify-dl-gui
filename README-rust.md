@@ -33,14 +33,18 @@ Useful smoke-test variants:
 cargo run -p spotifydl-cli -- status
 cargo run -p spotifydl-cli -- status --json
 cargo run -p spotifydl-cli -- status --require-ready
+cargo run -p spotifydl-cli -- configure-backend --backend library
 cargo run -p spotifydl-cli -- configure-backend --backend external --executable path\to\spotify-dl.exe
 cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads <spotify-url>...
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads --pause-after-seconds 3 --resume-after-seconds 8 <spotify-url>...
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads --cancel-after-seconds 5 <spotify-url>...
 ```
 
 ## Notes
 
-- The current milestone can run either the fake backend or the external `spotify-dl` adapter.
+- Fresh installs now default to the vendored `Library` backend, with `External` still available as a fallback adapter and `Fake` retained for tests/smoke usage.
 - The external adapter now performs backend preflight checks before starting work.
+- The library backend now supports cooperative pause, resume, and cancel at safe boundaries.
 - Queue/history/settings/logs are persisted in SQLite.
 
 ## Bundled Downloader Layout
@@ -95,8 +99,8 @@ That script will:
 - build `spotifydl-cli.exe` and `spotifydl-gui.exe` in release mode
 - create `dist\rust-package\`
 - copy the Rust CLI and GUI into that directory
-- copy `spotify-dl.exe` into the packaged root
-- configure the package-local SQLite file to use the `External` backend
+- copy `spotify-dl.exe` into the packaged root when one is available
+- configure the package-local SQLite file to use the `Library` backend
 - run `spotifydl-cli.exe status --require-ready` against that package-local SQLite file
 
 Useful variants:
@@ -111,11 +115,16 @@ That should confirm:
 
 - the SQLite database opens
 - the selected backend is visible
-- the external downloader is actually discoverable from the packaged layout
+- the packaged app is ready on its primary library-backed path
+- when `spotify-dl.exe` is staged, the external fallback is present in the package layout too
 
 For a real-world isolated validation run against actual URLs, the CLI now also supports:
 
 ```powershell
+cargo run -p spotifydl-cli -- configure-backend --database path\to\validation.sqlite --backend library
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads <spotify-url>...
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads --pause-after-seconds 3 --resume-after-seconds 8 <spotify-url>...
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads --cancel-after-seconds 5 <spotify-url>...
 cargo run -p spotifydl-cli -- configure-backend --database path\to\validation.sqlite --backend external --executable path\to\spotify-dl.exe
 cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads <spotify-url>...
 ```
@@ -781,6 +790,24 @@ Decision:
 - Keep the current external-process adapter as the operational path while the library adapter is built behind `spotifydl-core`.
 - Link the vendored crate only through the optional `spotifydl-core` feature `vendored-upstream` until the library path is real enough to switch on deliberately.
 - Pin the initial vendored snapshot to upstream commit `f71baa6537ecc59a0dafe45c7dc74e0c8965f488`.
+
+Current progress:
+- `spotifydl-core` now has a feature-gated `LibraryDownloader::resolve_collection(...)` entry point.
+- With `--features vendored-upstream`, it can resolve a single Spotify source URL into concrete tracks plus item metadata by calling the vendored upstream library directly.
+- The vendored downloader now also exposes typed in-process download events, and `LibraryDownloader` can start a real vendored download worker and translate those events into backend events.
+- The library backend now supports cooperative `Cancel` by propagating a shared cancellation token through vendored download stages and reporting the job as `Cancelled` at the next safe boundary.
+- `spotifydl-service` now uses that resolver as a best-effort enqueue-time enrichment step for external-backend jobs, so queue entries can start with real item lists, labels, and totals before download begins.
+- Queue and history records now preserve the original user-entered source URLs separately from expanded track items, so album/playlist jobs can be requeued and inspected without losing their true inputs.
+- `BackendKind::Library` is now selectable through the service/GUI/CLI, and reports ready when the vendored library path is linked.
+
+Known limitations of the current library execution path:
+- pause, resume, and cancel are cooperative rather than immediate: they stop or continue the vendored downloader at safe boundaries instead of interrupting encode/file I/O mid-step
+- we now have isolated real-world live smokes for the library backend on this machine:
+  - single track completed successfully and wrote one output
+  - album completed successfully and wrote 15 outputs
+  - album pause/resume completed successfully and still wrote 15 outputs
+  - album cancellation completed successfully and moved the job to `Cancelled` with zero outputs written
+- the biggest remaining risk is not basic download correctness, but control semantics and any performance differences versus the external-process path
 
 Why this is the right version of “just import the other repo”:
 - It gives this repo direct access to the real downloader code and types.

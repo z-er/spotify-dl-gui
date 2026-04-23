@@ -6,12 +6,14 @@ use std::{
 use spotifydl_core::{
     BackendControl, BackendControlRequest, BackendEvent, BackendHealth, BackendItemDescriptor,
     BackendRunRequest, DownloadBackend, ExternalDownloader, ExternalDownloaderConfig,
-    FakeDownloader,
+    FakeDownloader, LibraryDownloader, LibraryDownloaderError, ResolvedCollection,
+    ResolvedCollectionItem,
 };
 use spotifydl_protocol::{
-    AppSettings, AppSnapshot, BackendKind, FailureReason, FailureReasonKind, HistoryEntry, ItemId,
-    ItemState, JobId, JobOptions, JobRecord, JobSourceKind, JobState, JobTotals, LogEntry,
-    LogLevel, LogScope, ProgressState, QueueStatus, ServiceCommand, ServiceEvent, TimestampMs,
+    AppSettings, AppSnapshot, BackendKind, DownloadItem, FailureReason, FailureReasonKind,
+    HistoryEntry, ItemId, ItemState, JobId, JobOptions, JobRecord, JobSourceKind, JobState,
+    JobTotals, LogEntry, LogLevel, LogScope, ProgressState, QueueStatus, ServiceCommand,
+    ServiceEvent, TimestampMs,
 };
 use spotifydl_storage::{SqliteStore, StorageError};
 use thiserror::Error;
@@ -97,6 +99,7 @@ impl SpotifydlService {
                 base_args: Vec::new(),
                 environment: Vec::new(),
             })),
+            BackendKind::Library => Box::new(LibraryDownloader::default()),
         }
     }
 
@@ -180,6 +183,7 @@ impl SpotifydlService {
                 job.source.kind = source_kind;
             }
             job.options = self.effective_job_options(options.clone());
+            self.try_enrich_job_with_library_resolution(&mut job, events);
             self.push_log(
                 LogLevel::Info,
                 LogScope::Service,
@@ -202,22 +206,37 @@ impl SpotifydlService {
         events: &mut Vec<ServiceEvent>,
     ) {
         let now = now_ms();
-        if let Some(job) = self.find_job_mut(job_id) {
-            let start_len = job.items.len() as u32;
-            let mut added = 0u32;
-            for (offset, url) in urls
-                .into_iter()
-                .map(|url| url.trim().to_string())
-                .filter(|url| !url.is_empty())
-                .enumerate()
-            {
-                let mut temp_job = JobRecord::new(start_len + offset as u32, url, now);
-                let item = temp_job.items.remove(0);
-                job.items.push(item);
-                added += 1;
-            }
+        let Some(start_len) = self
+            .snapshot
+            .queue
+            .jobs
+            .iter()
+            .find(|job| &job.id == job_id)
+            .map(|job| job.items.len() as u32)
+        else {
+            return;
+        };
 
+        let mut added = 0u32;
+        let mut resolved_items = Vec::new();
+        let mut appended_inputs = Vec::new();
+        for (offset, url) in urls
+            .into_iter()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .enumerate()
+        {
+            let mut temp_job = JobRecord::new(start_len + offset as u32, url, now);
+            self.try_enrich_job_with_library_resolution(&mut temp_job, events);
+            added += temp_job.items.len() as u32;
+            appended_inputs.extend(temp_job.original_inputs.iter().cloned());
+            resolved_items.extend(temp_job.items.into_iter());
+        }
+
+        if let Some(job) = self.find_job_mut(job_id) {
             if added > 0 {
+                job.original_inputs.extend(appended_inputs);
+                job.items.extend(resolved_items);
                 job.updated_at_ms = now;
                 Self::refresh_job_derived_state(job, None);
                 events.push(ServiceEvent::JobUpdated(job.clone()));
@@ -1197,6 +1216,106 @@ impl SpotifydlService {
         effective
     }
 
+    fn try_enrich_job_with_library_resolution(
+        &mut self,
+        job: &mut JobRecord,
+        events: &mut Vec<ServiceEvent>,
+    ) {
+        if self.snapshot.settings.preferred_backend == BackendKind::Fake {
+            return;
+        }
+
+        let downloader = LibraryDownloader::default();
+        let resolved = match downloader.resolve_collection(&job.source_url) {
+            Ok(resolved) => resolved,
+            Err(LibraryDownloaderError::FeatureDisabled) => return,
+            Err(error) => {
+                self.push_log(
+                    LogLevel::Warn,
+                    LogScope::Service,
+                    Some(job.id.clone()),
+                    None,
+                    format!("Library metadata enrichment skipped: {error}"),
+                    events,
+                );
+                return;
+            }
+        };
+
+        let resolved_count = resolved.items.len();
+        Self::apply_resolved_collection_to_job(job, resolved, now_ms());
+        self.push_log(
+            LogLevel::Info,
+            LogScope::Service,
+            Some(job.id.clone()),
+            None,
+            format!(
+                "Resolved {} queued item{} from source metadata",
+                resolved_count,
+                if resolved_count == 1 { "" } else { "s" }
+            ),
+            events,
+        );
+    }
+
+    fn apply_resolved_collection_to_job(
+        job: &mut JobRecord,
+        resolved: ResolvedCollection,
+        now: TimestampMs,
+    ) {
+        if !resolved.label.trim().is_empty() {
+            job.label = resolved.label;
+        }
+
+        job.items = resolved
+            .items
+            .into_iter()
+            .map(|item| Self::download_item_from_resolved(item, now))
+            .collect();
+
+        if job.items.is_empty() {
+            job.items.push(DownloadItem {
+                id: ItemId::new(),
+                label: job.source_url.clone(),
+                url: job.source_url.clone(),
+                state: ItemState::Queued,
+                progress: ProgressState::pending("Waiting for downloader"),
+                created_at_ms: now,
+                updated_at_ms: now,
+                started_at_ms: None,
+                finished_at_ms: None,
+                failure_reason: None,
+                metadata: Default::default(),
+                outputs: Vec::new(),
+                flags: Vec::new(),
+            });
+        }
+
+        Self::refresh_job_derived_state(job, None);
+    }
+
+    fn download_item_from_resolved(item: ResolvedCollectionItem, now: TimestampMs) -> DownloadItem {
+        DownloadItem {
+            id: ItemId::new(),
+            label: if item.label.trim().is_empty() {
+                item.url.clone()
+            } else {
+                item.label
+            },
+            url: item.url,
+            state: ItemState::Queued,
+            progress: ProgressState::pending("Waiting for downloader"),
+            created_at_ms: now,
+            updated_at_ms: now,
+            started_at_ms: None,
+            finished_at_ms: None,
+            failure_reason: None,
+            metadata: item.metadata,
+            outputs: Vec::new(),
+            flags: Vec::new(),
+        }
+    }
+
     fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
         settings.default_destination = settings.default_destination.trim().to_string();
         settings.default_format = if settings.default_format.trim().is_empty() {
@@ -1570,7 +1689,10 @@ mod tests {
     };
 
     use super::*;
-    use spotifydl_core::{BackendCapabilities, BackendHealth};
+    use spotifydl_core::{
+        BackendCapabilities, BackendHealth, ResolvedCollection, ResolvedCollectionItem,
+        ResolvedCollectionKind,
+    };
     use spotifydl_protocol::{
         BackendKind, BackoffState, IntegrityFlag, IntegritySeverity, ItemMetadata,
         OutputDisposition, OutputRecord, ServiceCommand,
@@ -3065,6 +3187,64 @@ mod tests {
 
         drop(service);
         let _ = fs::remove_file(&database_path);
+    }
+
+    #[test]
+    fn applies_resolved_collection_shape_to_queued_job() {
+        let now = now_ms();
+        let mut job = JobRecord::new(
+            0,
+            "https://open.spotify.com/album/demo-album".to_string(),
+            now,
+        );
+        let resolved = ResolvedCollection {
+            source_url: job.source_url.clone(),
+            kind: ResolvedCollectionKind::Album,
+            label: "Demo Album - Demo Artist".to_string(),
+            items: vec![
+                ResolvedCollectionItem {
+                    position: 1,
+                    url: "spotify:track:one".to_string(),
+                    label: "Track One - Demo Artist".to_string(),
+                    metadata: ItemMetadata {
+                        artist: "Demo Artist".to_string(),
+                        album: "Demo Album".to_string(),
+                        title: "Track One".to_string(),
+                        album_artist: "Demo Artist".to_string(),
+                    },
+                },
+                ResolvedCollectionItem {
+                    position: 2,
+                    url: "spotify:track:two".to_string(),
+                    label: "Track Two - Demo Artist".to_string(),
+                    metadata: ItemMetadata {
+                        artist: "Demo Artist".to_string(),
+                        album: "Demo Album".to_string(),
+                        title: "Track Two".to_string(),
+                        album_artist: "Demo Artist".to_string(),
+                    },
+                },
+            ],
+        };
+
+        SpotifydlService::apply_resolved_collection_to_job(&mut job, resolved, now);
+
+        assert_eq!(job.label, "Demo Album - Demo Artist");
+        assert_eq!(
+            job.original_inputs,
+            vec!["https://open.spotify.com/album/demo-album".to_string()]
+        );
+        assert_eq!(job.items.len(), 2);
+        assert_eq!(job.items[0].label, "Track One - Demo Artist");
+        assert_eq!(job.items[0].url, "spotify:track:one");
+        assert_eq!(job.items[1].label, "Track Two - Demo Artist");
+        assert_eq!(job.totals.items_total, 2);
+
+        let history_entry = HistoryEntry::from_job(job);
+        assert_eq!(
+            history_entry.original_inputs,
+            vec!["https://open.spotify.com/album/demo-album".to_string()]
+        );
     }
 
     #[test]
