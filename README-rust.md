@@ -33,6 +33,8 @@ Useful smoke-test variants:
 cargo run -p spotifydl-cli -- status
 cargo run -p spotifydl-cli -- status --json
 cargo run -p spotifydl-cli -- status --require-ready
+cargo run -p spotifydl-cli -- configure-backend --backend external --executable path\to\spotify-dl.exe
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads <spotify-url>...
 ```
 
 ## Notes
@@ -110,6 +112,15 @@ That should confirm:
 - the SQLite database opens
 - the selected backend is visible
 - the external downloader is actually discoverable from the packaged layout
+
+For a real-world isolated validation run against actual URLs, the CLI now also supports:
+
+```powershell
+cargo run -p spotifydl-cli -- configure-backend --database path\to\validation.sqlite --backend external --executable path\to\spotify-dl.exe
+cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --destination path\to\downloads <spotify-url>...
+```
+
+That path is intended for functional validation against the real downloader while keeping the main app database and output directory isolated.
 
 ## Architecture Lock
 

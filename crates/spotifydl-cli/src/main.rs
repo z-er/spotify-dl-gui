@@ -1,8 +1,15 @@
-use std::{env, path::PathBuf, process};
+use std::{
+    collections::HashSet,
+    env,
+    path::PathBuf,
+    process,
+    thread,
+    time::{Duration, Instant},
+};
 
 use directories::ProjectDirs;
 use serde_json::json;
-use spotifydl_protocol::{BackendKind, ServiceCommand};
+use spotifydl_protocol::{BackendKind, JobOptions, JobState, ServiceCommand};
 use spotifydl_service::SpotifydlService;
 
 fn main() {
@@ -27,6 +34,12 @@ fn main() {
             backend,
             executable,
         } => run_configure_backend(database_path, backend, executable),
+        CliCommand::RunUrls {
+            database_path,
+            urls,
+            destination,
+            timeout_seconds,
+        } => run_urls(database_path, urls, destination, timeout_seconds),
     }
 }
 
@@ -41,6 +54,12 @@ enum CliCommand {
         database_path: Option<PathBuf>,
         backend: BackendKind,
         executable: Option<String>,
+    },
+    RunUrls {
+        database_path: Option<PathBuf>,
+        urls: Vec<String>,
+        destination: Option<String>,
+        timeout_seconds: u64,
     },
 }
 
@@ -137,6 +156,62 @@ impl CliCommand {
                     database_path,
                     backend,
                     executable,
+                })
+            }
+            "run-urls" => {
+                let mut database_path = None;
+                let mut destination = None;
+                let mut timeout_seconds = 180u64;
+                let mut urls = Vec::new();
+
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--database" => {
+                            let Some(path) = args.get(index + 1) else {
+                                return Err("--database requires a path".to_string());
+                            };
+                            database_path = Some(PathBuf::from(path));
+                            index += 2;
+                        }
+                        "--destination" => {
+                            let Some(path) = args.get(index + 1) else {
+                                return Err("--destination requires a path".to_string());
+                            };
+                            destination = Some(path.clone());
+                            index += 2;
+                        }
+                        "--timeout-seconds" => {
+                            let Some(value) = args.get(index + 1) else {
+                                return Err("--timeout-seconds requires a value".to_string());
+                            };
+                            timeout_seconds = value.parse::<u64>().map_err(|_| {
+                                "--timeout-seconds must be an integer".to_string()
+                            })?;
+                            index += 2;
+                        }
+                        "--help" | "-h" => {
+                            print_usage();
+                            process::exit(0);
+                        }
+                        value if value.starts_with('-') => {
+                            return Err(format!("unrecognized argument: {value}"));
+                        }
+                        value => {
+                            urls.push(value.to_string());
+                            index += 1;
+                        }
+                    }
+                }
+
+                if urls.is_empty() {
+                    return Err("run-urls requires at least one Spotify URL".to_string());
+                }
+
+                Ok(Self::RunUrls {
+                    database_path,
+                    urls,
+                    destination,
+                    timeout_seconds,
                 })
             }
             other => Err(format!("unrecognized command: {other}")),
@@ -259,6 +334,128 @@ fn run_configure_backend(
     );
 }
 
+fn run_urls(
+    database_path: Option<PathBuf>,
+    urls: Vec<String>,
+    destination: Option<String>,
+    timeout_seconds: u64,
+) {
+    let database_path = database_path.unwrap_or_else(default_database_path);
+    let mut service = open_service_or_exit(&database_path);
+    let existing_job_ids = service
+        .snapshot()
+        .queue
+        .jobs
+        .iter()
+        .map(|job| job.id.clone())
+        .collect::<HashSet<_>>();
+
+    let options = destination.map(|destination| JobOptions {
+        destination,
+        ..JobOptions::default()
+    });
+
+    if let Err(error) = service.dispatch(ServiceCommand::EnqueueUrls {
+        urls,
+        source: None,
+        options,
+    }) {
+        eprintln!(
+            "failed to enqueue URLs at {}: {error}",
+            database_path.display()
+        );
+        process::exit(1);
+    }
+
+    let queued_job_ids = service
+        .snapshot()
+        .queue
+        .jobs
+        .iter()
+        .filter(|job| !existing_job_ids.contains(&job.id))
+        .map(|job| job.id.clone())
+        .collect::<Vec<_>>();
+
+    if let Err(error) = service.dispatch(ServiceCommand::StartQueue) {
+        eprintln!(
+            "failed to start queue at {}: {error}",
+            database_path.display()
+        );
+        process::exit(1);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
+    while Instant::now() < deadline {
+        let all_in_history = queued_job_ids.iter().all(|job_id| {
+            service
+                .snapshot()
+                .history
+                .iter()
+                .any(|entry| &entry.job.id == job_id)
+        });
+        if all_in_history {
+            break;
+        }
+
+        if let Err(error) = service.dispatch(ServiceCommand::Tick) {
+            eprintln!(
+                "failed while ticking queue at {}: {error}",
+                database_path.display()
+            );
+            process::exit(1);
+        }
+
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let snapshot = service.snapshot();
+    let mut history_jobs = snapshot
+        .history
+        .iter()
+        .filter(|entry| queued_job_ids.iter().any(|job_id| job_id == &entry.job.id))
+        .collect::<Vec<_>>();
+
+    if history_jobs.len() != queued_job_ids.len() {
+        eprintln!(
+            "timed out waiting for queued jobs to finish; completed {}/{} job(s)",
+            history_jobs.len(),
+            queued_job_ids.len()
+        );
+        process::exit(4);
+    }
+
+    history_jobs.sort_by_key(|entry| entry.job.created_at_ms);
+    for entry in &history_jobs {
+        println!("job: {}", entry.job.label);
+        println!("state: {:?}", entry.job.state);
+        println!(
+            "totals: completed={} failed={} outputs_written={} flagged_items={}",
+            entry.job.totals.items_completed,
+            entry.job.totals.items_failed,
+            entry.job.totals.outputs_written,
+            entry.job.totals.flagged_items
+        );
+        for item in &entry.job.items {
+            println!(
+                "item: {} | {:?} | outputs={} | flags={}",
+                item.label,
+                item.state,
+                item.outputs.len(),
+                item.flags.len()
+            );
+        }
+        println!("---");
+    }
+
+    if history_jobs
+        .iter()
+        .any(|entry| entry.job.state != JobState::Completed)
+    {
+        eprintln!("one or more jobs did not complete successfully");
+        process::exit(5);
+    }
+}
+
 fn open_service_or_exit(database_path: &PathBuf) -> SpotifydlService {
     match SpotifydlService::open(database_path) {
         Ok(service) => service,
@@ -316,6 +513,9 @@ fn print_usage() {
     );
     eprintln!(
         "  cargo run -p spotifydl-cli -- configure-backend --backend <fake|external> [--executable PATH] [--database PATH]"
+    );
+    eprintln!(
+        "  cargo run -p spotifydl-cli -- run-urls [--database PATH] [--destination PATH] [--timeout-seconds N] <spotify-url>..."
     );
 }
 
@@ -385,6 +585,35 @@ mod tests {
         assert_eq!(parse_backend_kind("fake"), Ok(BackendKind::Fake));
         assert_eq!(parse_backend_kind("external"), Ok(BackendKind::External));
         assert!(parse_backend_kind("invalid").is_err());
+    }
+
+    #[test]
+    fn parses_run_urls_flags() {
+        let args = vec![
+            "run-urls".to_string(),
+            "--database".to_string(),
+            "C:/data/app.sqlite".to_string(),
+            "--destination".to_string(),
+            "C:/music".to_string(),
+            "--timeout-seconds".to_string(),
+            "90".to_string(),
+            "https://open.spotify.com/track/abc".to_string(),
+            "https://open.spotify.com/track/def".to_string(),
+        ];
+
+        let command = CliCommand::parse(&args).expect("run-urls args should parse");
+        assert_eq!(
+            command,
+            CliCommand::RunUrls {
+                database_path: Some(PathBuf::from("C:/data/app.sqlite")),
+                urls: vec![
+                    "https://open.spotify.com/track/abc".to_string(),
+                    "https://open.spotify.com/track/def".to_string(),
+                ],
+                destination: Some("C:/music".to_string()),
+                timeout_seconds: 90,
+            }
+        );
     }
 
     #[test]
