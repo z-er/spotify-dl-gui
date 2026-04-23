@@ -2066,6 +2066,184 @@ mod tests {
     }
 
     #[test]
+    fn maps_real_external_malformed_stdout_and_stderr_into_logs() {
+        let database_path = temp_database_path();
+        let temp_root = temp_fixture_dir("external-log-noise");
+        let script_path = write_external_script(
+            &temp_root,
+            "external-log-noise.cmd",
+            &[
+                r#"echo not-json-output"#,
+                r#"echo {"event":"track_start","track_id":"noise1","track":"Noise Track"}"#,
+                r#"echo {"event":"track_complete","track_id":"noise1","track":"Noise Track","path":"C:/music/noise1.flac"}"#,
+                r#"echo stderr: transient warning 1>&2"#,
+            ],
+            0,
+        );
+        let comspec = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .expect("ComSpec should point to cmd.exe");
+
+        let mut service = SpotifydlService::open_with_backend(
+            &database_path,
+            Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
+                executable: comspec,
+                working_directory: Some(temp_root.clone()),
+                base_args: vec![
+                    "/C".to_string(),
+                    script_path.to_string_lossy().to_string(),
+                ],
+                environment: Vec::new(),
+            })),
+        )
+        .expect("service should open with external backend");
+
+        let (job_id, item_ids) =
+            enqueue_urls(&mut service, &["https://open.spotify.com/track/noise1"]);
+        let item_id = item_ids[0].clone();
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        pump_ticks_until(
+            &mut service,
+            |service| {
+                service
+                    .snapshot()
+                    .history
+                    .iter()
+                    .any(|entry| entry.job.id == job_id)
+            },
+            80,
+        );
+
+        let history_job = service
+            .snapshot()
+            .history
+            .iter()
+            .find(|entry| entry.job.id == job_id)
+            .expect("job should move to history")
+            .job
+            .clone();
+        let item = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .expect("history item should exist");
+
+        assert_eq!(history_job.state, JobState::Completed);
+        assert_eq!(item.state, ItemState::Completed);
+        assert_eq!(item.outputs.len(), 1);
+        assert!(
+            service.snapshot().logs.iter().any(|entry| {
+                entry.message.contains("[stdout] not-json-output")
+            }),
+            "expected malformed stdout line to be preserved in logs"
+        );
+        assert!(
+            service.snapshot().logs.iter().any(|entry| {
+                entry.message.contains("[stderr] stderr: transient warning")
+            }),
+            "expected stderr output to be preserved in logs"
+        );
+
+        drop(service);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn logs_unmatched_external_track_events_without_corrupting_completion() {
+        let database_path = temp_database_path();
+        let temp_root = temp_fixture_dir("external-unmatched");
+        let script_path = write_external_script(
+            &temp_root,
+            "external-unmatched.cmd",
+            &[
+                r#"echo {"event":"track_start","track_id":"unknown-track","track":"Unknown Track"}"#,
+                r#"echo {"event":"track_start","track_id":"known1","track":"Known Track"}"#,
+                r#"echo {"event":"track_complete","track_id":"known1","track":"Known Track","path":"C:/music/known1.flac"}"#,
+                r#"echo {"event":"track_start","track_id":"known2","track":"Known Track 2"}"#,
+                r#"echo {"event":"track_complete","track_id":"known2","track":"Known Track 2","path":"C:/music/known2.flac"}"#,
+            ],
+            0,
+        );
+        let comspec = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .expect("ComSpec should point to cmd.exe");
+
+        let mut service = SpotifydlService::open_with_backend(
+            &database_path,
+            Box::new(ExternalDownloader::new(ExternalDownloaderConfig {
+                executable: comspec,
+                working_directory: Some(temp_root.clone()),
+                base_args: vec![
+                    "/C".to_string(),
+                    script_path.to_string_lossy().to_string(),
+                ],
+                environment: Vec::new(),
+            })),
+        )
+        .expect("service should open with external backend");
+
+        let (job_id, item_ids) = enqueue_urls(
+            &mut service,
+            &[
+                "https://open.spotify.com/track/known1",
+                "https://open.spotify.com/track/known2",
+            ],
+        );
+        let item_id_1 = item_ids[0].clone();
+        let item_id_2 = item_ids[1].clone();
+
+        dispatch_ok(&mut service, ServiceCommand::StartQueue);
+        pump_ticks_until(
+            &mut service,
+            |service| {
+                service
+                    .snapshot()
+                    .history
+                    .iter()
+                    .any(|entry| entry.job.id == job_id)
+            },
+            80,
+        );
+
+        let history_job = service
+            .snapshot()
+            .history
+            .iter()
+            .find(|entry| entry.job.id == job_id)
+            .expect("job should move to history")
+            .job
+            .clone();
+        let item_1 = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_id_1)
+            .expect("first history item should exist");
+        let item_2 = history_job
+            .items
+            .iter()
+            .find(|item| item.id == item_id_2)
+            .expect("second history item should exist");
+
+        assert_eq!(history_job.state, JobState::Completed);
+        assert_eq!(item_1.state, ItemState::Completed);
+        assert_eq!(item_1.outputs.len(), 1);
+        assert_eq!(item_2.state, ItemState::Completed);
+        assert_eq!(item_2.outputs.len(), 1);
+        assert!(
+            service.snapshot().logs.iter().any(|entry| {
+                entry.message.contains("Unmatched track_start event")
+            }),
+            "expected unmatched track event to be logged"
+        );
+
+        drop(service);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn completes_successful_job_with_output_history() {
         let (mut service, handle, database_path) = open_scripted_service();
         let (job_id, item_ids) =
