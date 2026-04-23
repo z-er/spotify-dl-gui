@@ -5,6 +5,25 @@ use thiserror::Error;
 
 use crate::{BackendCapabilities, BackendEvent, BackendHealth, BackendRunRequest, DownloadBackend};
 
+#[cfg(feature = "vendored-upstream")]
+const DISCOVERY_NOTES: &[&str] = &[
+    "Upstream already exposes a library crate via src/lib.rs; the CLI main.rs is a thin wrapper around library calls.",
+    "Collection resolution currently expands album and playlist URLs into Vec<Track> before download starts.",
+    "Track metadata includes track title, album, album artist, artist list, and position.",
+    "Playlist title is not surfaced by track::get_tracks today; deeper integration may require an upstream extension or direct librespot playlist metadata fetch.",
+    "This build links the vendored upstream crate via the spotifydl-core `vendored-upstream` feature.",
+    "The vendored upstream snapshot is pinned under vendor/spotify-dl at commit f71baa6537ecc59a0dafe45c7dc74e0c8965f488.",
+];
+
+#[cfg(not(feature = "vendored-upstream"))]
+const DISCOVERY_NOTES: &[&str] = &[
+    "Upstream already exposes a library crate via src/lib.rs; the CLI main.rs is a thin wrapper around library calls.",
+    "Collection resolution currently expands album and playlist URLs into Vec<Track> before download starts.",
+    "Track metadata includes track title, album, album artist, artist list, and position.",
+    "Playlist title is not surfaced by track::get_tracks today; deeper integration may require an upstream extension or direct librespot playlist metadata fetch.",
+    "The vendored upstream snapshot lives under vendor/spotify-dl but this build did not enable the spotifydl-core `vendored-upstream` feature.",
+];
+
 #[derive(Debug, Clone, Default)]
 pub struct LibraryDownloaderConfig {
     pub upstream_checkout: Option<PathBuf>,
@@ -52,6 +71,10 @@ impl LibraryDownloader {
         &self.config
     }
 
+    pub fn vendored_upstream_enabled() -> bool {
+        cfg!(feature = "vendored-upstream")
+    }
+
     pub fn discovery() -> UpstreamDiscovery {
         UpstreamDiscovery {
             crate_name: "spotify-dl",
@@ -66,12 +89,7 @@ impl LibraryDownloader {
             session_entrypoint: "spotify_dl::session::create_session",
             collection_entrypoint: "spotify_dl::track::get_tracks",
             download_entrypoint: "spotify_dl::download::Downloader::download_tracks",
-            notes: &[
-                "Upstream already exposes a library crate via src/lib.rs; the CLI main.rs is a thin wrapper around library calls.",
-                "Collection resolution currently expands album and playlist URLs into Vec<Track> before download starts.",
-                "Track metadata includes track title, album, album artist, artist list, and position.",
-                "Playlist title is not surfaced by track::get_tracks today; deeper integration may require an upstream extension or direct librespot playlist metadata fetch.",
-            ],
+            notes: DISCOVERY_NOTES,
         }
     }
 
@@ -82,12 +100,14 @@ impl LibraryDownloader {
             failure_reason: Some(FailureReason {
                 kind: FailureReasonKind::Unknown,
                 code: Some("LIBRARY_ADAPTER_NOT_IMPLEMENTED".to_string()),
-                message: "Library-backed spotify-dl integration is not implemented yet"
-                    .to_string(),
-                details: Some(
-                    "See README-rust.md on rust-library-integration-plan for the current migration plan."
-                        .to_string(),
-                ),
+                message: "Library-backed spotify-dl integration is not implemented yet".to_string(),
+                details: Some(if Self::vendored_upstream_enabled() {
+                    "The vendored upstream crate is linked, but the adapter still needs a real session / track-resolution / download bridge. See README-rust.md on rust-library-integration-plan."
+                        .to_string()
+                } else {
+                    "Enable the spotifydl-core `vendored-upstream` feature or see README-rust.md on rust-library-integration-plan for the current migration plan."
+                        .to_string()
+                }),
             }),
         }]
     }
@@ -99,10 +119,18 @@ impl DownloadBackend for LibraryDownloader {
     }
 
     fn health(&self) -> BackendHealth {
-        BackendHealth {
-            ready: false,
-            message: "Library-backed spotify-dl integration is planned but not implemented"
-                .to_string(),
+        if Self::vendored_upstream_enabled() {
+            BackendHealth {
+                ready: false,
+                message: "Vendored spotify-dl crate is linked; library-backed adapter execution is not implemented yet"
+                    .to_string(),
+            }
+        } else {
+            BackendHealth {
+                ready: false,
+                message: "Library-backed spotify-dl integration is scaffolded; enable spotifydl-core feature `vendored-upstream` to link the vendored crate"
+                    .to_string(),
+            }
         }
     }
 
@@ -151,5 +179,13 @@ mod tests {
                 .surfaces
                 .contains(&UpstreamIntegrationSurface::CollectionResolution)
         );
+    }
+
+    #[cfg(feature = "vendored-upstream")]
+    #[test]
+    fn vendored_upstream_symbols_are_linkable() {
+        let _ = upstream_spotify_dl::session::create_session;
+        let _ = upstream_spotify_dl::track::get_tracks;
+        let _ = std::any::type_name::<upstream_spotify_dl::download::Downloader>();
     }
 }

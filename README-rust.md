@@ -776,6 +776,23 @@ Recommended default:
 Non-goal:
 - scattering upstream code changes across app crates
 
+Decision:
+- Use a vendored snapshot under `vendor/spotify-dl`.
+- Keep the current external-process adapter as the operational path while the library adapter is built behind `spotifydl-core`.
+- Link the vendored crate only through the optional `spotifydl-core` feature `vendored-upstream` until the library path is real enough to switch on deliberately.
+- Pin the initial vendored snapshot to upstream commit `f71baa6537ecc59a0dafe45c7dc74e0c8965f488`.
+
+Why this is the right version of “just import the other repo”:
+- It gives this repo direct access to the real downloader code and types.
+- It keeps all upstream coupling isolated to `spotifydl-core` instead of bleeding through the GUI, service, and protocol crates.
+- It preserves the current last-known-good process adapter while the deeper integration is still incomplete.
+- It keeps future upstream diffs reviewable because the vendor boundary is explicit.
+
+What we are explicitly not doing:
+- We are not replacing the current working adapter in one jump.
+- We are not spreading vendored `spotify-dl` types across app-facing crates.
+- We are not making `spotify-dl` a required default build dependency yet.
+
 #### Phase 2: Define the library adapter contract
 
 Extend `spotifydl-core` around a richer adapter surface that is library-oriented, not process-oriented.

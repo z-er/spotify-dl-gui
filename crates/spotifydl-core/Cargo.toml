@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+vendored-upstream = ["dep:upstream_spotify_dl"]
+
 [dependencies]
 spotifydl-protocol = { path = "../spotifydl-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+upstream_spotify_dl = { package = "spotify-dl", path = "../../vendor/spotify-dl", optional = true }
