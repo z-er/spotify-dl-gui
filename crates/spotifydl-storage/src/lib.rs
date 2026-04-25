@@ -864,6 +864,7 @@ impl SqliteStore {
     fn load_settings(&self) -> StorageResult<Option<AppSettings>> {
         let default_destination = self.load_setting::<String>("default_destination")?;
         let default_format = self.load_setting::<String>("default_format")?;
+        let auto_add_clipboard_links = self.load_setting::<bool>("auto_add_clipboard_links")?;
         let max_parallel = self.load_setting::<u16>("max_parallel")?;
         let max_history_entries = self.load_setting::<usize>("max_history_entries")?;
         let max_log_entries = self.load_setting::<usize>("max_log_entries")?;
@@ -875,6 +876,7 @@ impl SqliteStore {
 
         let has_any = default_destination.is_some()
             || default_format.is_some()
+            || auto_add_clipboard_links.is_some()
             || max_parallel.is_some()
             || max_history_entries.is_some()
             || max_log_entries.is_some()
@@ -893,6 +895,9 @@ impl SqliteStore {
         }
         if let Some(value) = default_format {
             settings.default_format = value;
+        }
+        if let Some(value) = auto_add_clipboard_links {
+            settings.auto_add_clipboard_links = value;
         }
         if let Some(value) = max_parallel {
             settings.max_parallel = value;
@@ -929,6 +934,12 @@ impl SqliteStore {
             timestamp,
         )?;
         Self::save_setting(tx, "default_format", &settings.default_format, timestamp)?;
+        Self::save_setting(
+            tx,
+            "auto_add_clipboard_links",
+            &settings.auto_add_clipboard_links,
+            timestamp,
+        )?;
         Self::save_setting(tx, "max_parallel", &settings.max_parallel, timestamp)?;
         Self::save_setting(
             tx,

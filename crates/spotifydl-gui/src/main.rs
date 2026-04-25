@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use arboard::Clipboard;
 use chrono::{Local, TimeZone};
 use directories::ProjectDirs;
 use iced::{
@@ -37,6 +38,7 @@ struct SpotifydlGuiApp {
     external_backend_input: String,
     default_destination_input: String,
     default_format_input: String,
+    auto_add_clipboard_links: bool,
     max_parallel_input: String,
     theme_mode: ThemeMode,
     settings_tab: SettingsTab,
@@ -44,6 +46,7 @@ struct SpotifydlGuiApp {
     show_details_screen: bool,
     show_settings_screen: bool,
     displayed_progress: HashMap<JobId, f32>,
+    last_clipboard_text: Option<String>,
     selected_job: Option<SelectedJob>,
     last_error: Option<String>,
 }
@@ -114,6 +117,7 @@ enum Message {
     SelectDefaultFormat(AudioFormatOption),
     MaxParallelInputChanged(String),
     BrowseDownloadFolder,
+    ClipboardAutoAddToggled(bool),
     ThemeModeToggled(bool),
     SelectSettingsTab(SettingsTab),
     SelectQueueJob(JobId),
@@ -157,6 +161,7 @@ fn initialize() -> (SpotifydlGuiApp, Task<Message>) {
     let external_backend_input = snapshot.settings.external_backend_executable.clone();
     let default_destination_input = snapshot.settings.default_destination.clone();
     let default_format_input = snapshot.settings.default_format.clone();
+    let auto_add_clipboard_links = snapshot.settings.auto_add_clipboard_links;
     let max_parallel_input = snapshot.settings.max_parallel.to_string();
     let theme_mode = snapshot.settings.theme_mode;
 
@@ -168,6 +173,7 @@ fn initialize() -> (SpotifydlGuiApp, Task<Message>) {
         external_backend_input,
         default_destination_input,
         default_format_input,
+        auto_add_clipboard_links,
         max_parallel_input,
         theme_mode,
         settings_tab: SettingsTab::General,
@@ -175,6 +181,7 @@ fn initialize() -> (SpotifydlGuiApp, Task<Message>) {
         show_details_screen: false,
         show_settings_screen: false,
         displayed_progress: HashMap::new(),
+        last_clipboard_text: current_clipboard_text(),
         selected_job: None,
         last_error: None,
     };
@@ -328,6 +335,14 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
                 app.last_error = None;
             }
         }
+        Message::ClipboardAutoAddToggled(enabled) => {
+            app.auto_add_clipboard_links = enabled;
+            app.last_clipboard_text = current_clipboard_text();
+
+            let mut settings = app.snapshot.settings.clone();
+            settings.auto_add_clipboard_links = enabled;
+            let _ = dispatch(app, ServiceCommand::UpdateSettings { settings });
+        }
         Message::ThemeModeToggled(is_dark) => {
             let theme_mode = if is_dark {
                 ThemeMode::Dark
@@ -381,7 +396,17 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
             }
         }
         Message::Tick => {
-            dispatch(app, ServiceCommand::Tick);
+            if app.snapshot.queue.active_job_id.is_some()
+                || matches!(
+                    app.snapshot.queue.status,
+                    QueueStatus::Running | QueueStatus::Backoff
+                )
+            {
+                dispatch(app, ServiceCommand::Tick);
+            }
+            if app.auto_add_clipboard_links {
+                auto_queue_clipboard_links(app);
+            }
             animate_displayed_progress(app);
         }
     }
@@ -413,6 +438,8 @@ fn subscription(app: &SpotifydlGuiApp) -> Subscription<Message> {
         )
     {
         time::every(Duration::from_millis(250)).map(|_| Message::Tick)
+    } else if app.auto_add_clipboard_links {
+        time::every(Duration::from_millis(800)).map(|_| Message::Tick)
     } else {
         Subscription::none()
     }
@@ -488,6 +515,12 @@ fn bottom_control_bar(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     }
 
     let right = row![
+        row![
+            text("auto-add copied links").size(14),
+            toggler(app.auto_add_clipboard_links).on_toggle(Message::ClipboardAutoAddToggled),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
         action_button("history", Message::OpenHistoryScreen, ButtonTone::Ghost),
         action_button("settings", Message::OpenSettingsScreen, ButtonTone::Ghost),
     ]
@@ -633,6 +666,13 @@ fn settings_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
                 )
                 .padding([10, 12])
                 .width(Length::Fill),
+                row![
+                    text("Auto-add copied Spotify links").size(15),
+                    toggler(app.auto_add_clipboard_links)
+                        .on_toggle(Message::ClipboardAutoAddToggled),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
                 text("Available right now: alac (caf), flac, mp3 (320 kbps), mp3 (V0), and wav.")
                     .size(13),
                 text("alac is written in a CAF container for Apple-friendly lossless playback. opus is still not exposed because it would add packaging complexity without a good music-focused encoder path yet.")
@@ -2029,6 +2069,7 @@ fn sync_settings_inputs(app: &mut SpotifydlGuiApp) {
     app.external_backend_input = app.snapshot.settings.external_backend_executable.clone();
     app.default_destination_input = app.snapshot.settings.default_destination.clone();
     app.default_format_input = app.snapshot.settings.default_format.clone();
+    app.auto_add_clipboard_links = app.snapshot.settings.auto_add_clipboard_links;
     app.max_parallel_input = app.snapshot.settings.max_parallel.to_string();
 }
 
@@ -2037,7 +2078,66 @@ fn settings_dirty(app: &SpotifydlGuiApp) -> bool {
         || app.external_backend_input.trim() != app.snapshot.settings.external_backend_executable
         || app.default_destination_input.trim() != app.snapshot.settings.default_destination
         || app.default_format_input.trim() != app.snapshot.settings.default_format
+        || app.auto_add_clipboard_links != app.snapshot.settings.auto_add_clipboard_links
         || app.max_parallel_input.trim() != app.snapshot.settings.max_parallel.to_string()
+}
+
+fn auto_queue_clipboard_links(app: &mut SpotifydlGuiApp) {
+    let Some(clipboard_text) = current_clipboard_text() else {
+        return;
+    };
+
+    if app
+        .last_clipboard_text
+        .as_ref()
+        .is_some_and(|last| last == &clipboard_text)
+    {
+        return;
+    }
+
+    app.last_clipboard_text = Some(clipboard_text.clone());
+    let urls = extract_spotify_urls(&clipboard_text);
+    if urls.is_empty() {
+        return;
+    }
+
+    let _ = dispatch(
+        app,
+        ServiceCommand::EnqueueUrls {
+            urls,
+            source: None,
+            options: None,
+        },
+    );
+}
+
+fn current_clipboard_text() -> Option<String> {
+    let mut clipboard = Clipboard::new().ok()?;
+    let text = clipboard.get_text().ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn extract_spotify_urls(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(trim_clipboard_token)
+        .filter(|value| is_spotify_url(value))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn trim_clipboard_token(token: &str) -> &str {
+    token.trim_matches(|c: char| matches!(c, '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';'))
+}
+
+fn is_spotify_url(value: &str) -> bool {
+    value.starts_with("https://open.spotify.com/")
+        || value.starts_with("http://open.spotify.com/")
+        || value.starts_with("spotify:")
 }
 
 fn normalize_selected_job(app: &mut SpotifydlGuiApp) {

@@ -10,6 +10,8 @@ Scope of `v0.0.1`:
 - Rust GUI is usable for real downloads
 - library-backed downloader path is the primary backend
 - queue, pause, resume, cancel, history, and settings persistence all work
+- clipboard auto-add for copied Spotify links exists as a persisted GUI toggle
+- audio format selection now includes `alac (caf)`, `flac`, `mp3 (320 kbps)`, `mp3 (V0)`, and `wav`
 - GUI is intentionally still short of full legacy feature parity
 
 This tag is the "works, but just enough" baseline before the next feature-parity pass.
@@ -19,11 +21,11 @@ The legacy Python app remains unchanged in `spotifydl_gui/`.
 ## Workspace layout
 
 - `crates/spotifydl-protocol`: shared typed commands, events, job models, snapshots
-- `crates/spotifydl-core`: fake downloader backend and backend-facing abstractions
+- `crates/spotifydl-core`: downloader integration boundary, including vendored library-backed execution
 - `crates/spotifydl-storage`: SQLite persistence for queue/history/settings/logs
 - `crates/spotifydl-service`: queue state machine and protocol-driven service API
-- `crates/spotifydl-gui`: `iced` desktop shell wired to the fake service
-- `crates/spotifydl-cli`: minimal CLI smoke-test entrypoint
+- `crates/spotifydl-gui`: `iced` desktop application over the shared service layer
+- `crates/spotifydl-cli`: smoke-test and validation entrypoint over the same service layer
 
 ## Run the GUI
 
@@ -58,6 +60,36 @@ cargo run -p spotifydl-cli -- run-urls --database path\to\validation.sqlite --de
 - The external adapter now performs backend preflight checks before starting work.
 - The library backend now supports cooperative pause, resume, and cancel at safe boundaries.
 - Queue/history/settings/logs are persisted in SQLite.
+
+## Current GUI State
+
+The current Rust GUI is intentionally queue-first and simplified compared to earlier scaffold builds.
+
+Main-screen behavior today:
+- single-column queue-focused layout
+- pasted Spotify links can be queued directly from the front screen
+- completed downloads remain visible in the main list with quick `open` / `folder` actions
+- details, history, and settings are hidden behind dedicated screens instead of permanent split panes
+- auto-add from clipboard is available as a persisted front-screen toggle for copied Spotify links
+
+Settings currently include:
+- theme selection with dark mode as the default
+- download folder with browse support
+- audio format picker
+- optional clipboard auto-add toggle
+- advanced engine/backend options behind a separate settings tab
+
+Current format options:
+- `alac (caf)`
+- `flac`
+- `mp3 (320 kbps)`
+- `mp3 (V0)`
+- `wav`
+
+Notes on format support:
+- `alac` is currently written in a CAF container for Apple-friendly lossless playback
+- `wav` is supported as a broad compatibility fallback
+- `opus` and `m4a` are not exposed yet
 
 ## Bundled Downloader Layout
 
@@ -389,6 +421,9 @@ Current state:
 - queue and history show item-level outputs, flags, failures, and totals
 - history jobs can be requeued from the GUI
 - backend readiness and status are visible in the GUI
+- the main UI is now simplified into a queue-first layout with separate details/history/settings screens
+- completed downloads remain visible in the main list after finishing
+- clipboard auto-add exists as a persisted GUI toggle
 
 Remaining high-value work:
 - more polished settings UX and validation feedback
