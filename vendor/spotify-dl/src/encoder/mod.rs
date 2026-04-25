@@ -1,19 +1,30 @@
+mod alac;
 mod flac;
 #[cfg(feature = "mp3")]
 mod mp3;
 pub mod tags;
+mod wav;
 
 use std::{path::Path, str::FromStr};
 
 use anyhow::Result;
 
-use self::{flac::FlacEncoder, mp3::Mp3Encoder};
+use self::{
+    alac::AlacCafEncoder,
+    flac::FlacEncoder,
+    mp3::{Mp3Encoder320, Mp3EncoderV0},
+    wav::WavEncoder,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum Format {
+    Alac,
     Flac,
     #[cfg(feature = "mp3")]
     Mp3,
+    #[cfg(feature = "mp3")]
+    Mp3V0,
+    Wav,
 }
 
 impl FromStr for Format {
@@ -21,9 +32,13 @@ impl FromStr for Format {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
+            "alac" => Ok(Format::Alac),
             "flac" => Ok(Format::Flac),
             #[cfg(feature = "mp3")]
             "mp3" => Ok(Format::Mp3),
+            #[cfg(feature = "mp3")]
+            "mp3-v0" => Ok(Format::Mp3V0),
+            "wav" => Ok(Format::Wav),
             _ => Err(anyhow::anyhow!("Unsupported format")),
         }
     }
@@ -32,22 +47,34 @@ impl FromStr for Format {
 impl Format {
     pub fn extension(&self) -> &'static str {
         match self {
+            Format::Alac => "caf",
             Format::Flac => "flac",
             #[cfg(feature = "mp3")]
             Format::Mp3 => "mp3",
+            #[cfg(feature = "mp3")]
+            Format::Mp3V0 => "mp3",
+            Format::Wav => "wav",
         }
     }
 }
 
+const ALAC_ENCODER: &AlacCafEncoder = &AlacCafEncoder;
 const FLAC_ENCODER: &FlacEncoder = &FlacEncoder;
 #[cfg(feature = "mp3")]
-const MP3_ENCODER: &Mp3Encoder = &Mp3Encoder;
+const MP3_320_ENCODER: &Mp3Encoder320 = &Mp3Encoder320;
+#[cfg(feature = "mp3")]
+const MP3_V0_ENCODER: &Mp3EncoderV0 = &Mp3EncoderV0;
+const WAV_ENCODER: &WavEncoder = &WavEncoder;
 
 pub fn get_encoder(format: Format) -> &'static dyn Encoder {
     match format {
+        Format::Alac => ALAC_ENCODER,
         Format::Flac => FLAC_ENCODER,
         #[cfg(feature = "mp3")]
-        Format::Mp3 => MP3_ENCODER,
+        Format::Mp3 => MP3_320_ENCODER,
+        #[cfg(feature = "mp3")]
+        Format::Mp3V0 => MP3_V0_ENCODER,
+        Format::Wav => WAV_ENCODER,
     }
 }
 

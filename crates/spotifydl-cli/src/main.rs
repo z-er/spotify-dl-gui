@@ -209,39 +209,27 @@ impl CliCommand {
                             let Some(value) = args.get(index + 1) else {
                                 return Err("--cancel-after-seconds requires a value".to_string());
                             };
-                            cancel_after_seconds = Some(
-                                value
-                                    .parse::<u64>()
-                                    .map_err(|_| {
-                                        "--cancel-after-seconds must be an integer".to_string()
-                                    })?,
-                            );
+                            cancel_after_seconds = Some(value.parse::<u64>().map_err(|_| {
+                                "--cancel-after-seconds must be an integer".to_string()
+                            })?);
                             index += 2;
                         }
                         "--pause-after-seconds" => {
                             let Some(value) = args.get(index + 1) else {
                                 return Err("--pause-after-seconds requires a value".to_string());
                             };
-                            pause_after_seconds = Some(
-                                value
-                                    .parse::<u64>()
-                                    .map_err(|_| {
-                                        "--pause-after-seconds must be an integer".to_string()
-                                    })?,
-                            );
+                            pause_after_seconds = Some(value.parse::<u64>().map_err(|_| {
+                                "--pause-after-seconds must be an integer".to_string()
+                            })?);
                             index += 2;
                         }
                         "--resume-after-seconds" => {
                             let Some(value) = args.get(index + 1) else {
                                 return Err("--resume-after-seconds requires a value".to_string());
                             };
-                            resume_after_seconds = Some(
-                                value
-                                    .parse::<u64>()
-                                    .map_err(|_| {
-                                        "--resume-after-seconds must be an integer".to_string()
-                                    })?,
-                            );
+                            resume_after_seconds = Some(value.parse::<u64>().map_err(|_| {
+                                "--resume-after-seconds must be an integer".to_string()
+                            })?);
                             index += 2;
                         }
                         "--help" | "-h" => {
@@ -446,8 +434,8 @@ fn run_urls(
     }
 
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
-    let cancel_deadline = cancel_after_seconds
-        .map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
+    let cancel_deadline =
+        cancel_after_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
     let pause_deadline =
         pause_after_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds.max(1)));
     let resume_deadline =
@@ -500,9 +488,9 @@ fn run_urls(
         {
             if let Some(active_job_id) = service.snapshot().queue.active_job_id.clone() {
                 if queued_job_ids.iter().any(|job_id| job_id == &active_job_id) {
-                    if let Err(error) =
-                        service.dispatch(ServiceCommand::CancelJob { job_id: active_job_id.clone() })
-                    {
+                    if let Err(error) = service.dispatch(ServiceCommand::CancelJob {
+                        job_id: active_job_id.clone(),
+                    }) {
                         eprintln!(
                             "failed to cancel active job at {}: {error}",
                             database_path.display()

@@ -33,6 +33,8 @@ thiserror = "2.0.12"
 console = "0.16.0"
 tracing-appender = "0.2.3"
 once_cell = "1.21.3"
+hound = "3.5.1"
+alac-encoder = "0.3.0"
 
 [features]
 default = ["mp3"]

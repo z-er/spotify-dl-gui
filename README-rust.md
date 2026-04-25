@@ -2,6 +2,18 @@
 
 This repository now contains a Rust workspace for the next-generation rewrite of `spotify-dl-gui`.
 
+## Release Checkpoint
+
+The current Rust application is now treated as the first usable checkpoint and is tagged as `v0.0.1`.
+
+Scope of `v0.0.1`:
+- Rust GUI is usable for real downloads
+- library-backed downloader path is the primary backend
+- queue, pause, resume, cancel, history, and settings persistence all work
+- GUI is intentionally still short of full legacy feature parity
+
+This tag is the "works, but just enough" baseline before the next feature-parity pass.
+
 The legacy Python app remains unchanged in `spotifydl_gui/`.
 
 ## Workspace layout

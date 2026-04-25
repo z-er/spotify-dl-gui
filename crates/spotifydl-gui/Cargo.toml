@@ -8,5 +8,6 @@ license.workspace = true
 chrono.workspace = true
 directories.workspace = true
 iced.workspace = true
+rfd = "0.15.4"
 spotifydl-protocol = { path = "../spotifydl-protocol" }
 spotifydl-service = { path = "../spotifydl-service" }

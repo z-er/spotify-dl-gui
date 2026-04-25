@@ -135,7 +135,6 @@ impl DownloadOptions {
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
-
 }
 
 #[derive(Debug, Clone)]

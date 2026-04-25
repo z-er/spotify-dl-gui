@@ -8,13 +8,17 @@ use std::{
 use chrono::{Local, TimeZone};
 use directories::ProjectDirs;
 use iced::{
-    Background, Color, Element, Length, Shadow, Subscription, Task, Theme, Vector, application,
-    border, time,
-    widget::{button, column, container, progress_bar, row, scrollable, text, text_input, toggler},
+    Alignment, Background, Color, Element, Length, Shadow, Subscription, Task, Theme, Vector,
+    application, border, time,
+    widget::{
+        button, column, container, pick_list, progress_bar, row, scrollable, text, text_input,
+        toggler,
+    },
 };
+use rfd::FileDialog;
 use spotifydl_protocol::{
-    AppSnapshot, BackendKind, DownloadItem, HistoryEntry, ItemState, JobId, JobRecord, LogEntry,
-    QueueStatus, ServiceCommand, ThemeMode,
+    AppSnapshot, BackendKind, DownloadItem, HistoryEntry, ItemState, JobId, JobRecord, QueueStatus,
+    ServiceCommand, ThemeMode,
 };
 use spotifydl_service::SpotifydlService;
 
@@ -35,10 +39,25 @@ struct SpotifydlGuiApp {
     default_format_input: String,
     max_parallel_input: String,
     theme_mode: ThemeMode,
-    side_tab: SideTab,
+    settings_tab: SettingsTab,
+    show_history_screen: bool,
+    show_details_screen: bool,
+    show_settings_screen: bool,
     displayed_progress: HashMap<JobId, f32>,
     selected_job: Option<SelectedJob>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioFormatOption {
+    value: &'static str,
+    label: &'static str,
+}
+
+impl std::fmt::Display for AudioFormatOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,20 +67,9 @@ enum SelectedJob {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SideTab {
-    Overview,
-    History,
-    Settings,
-    Logs,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ButtonTone {
-    Primary,
-    Secondary,
-    Ghost,
-    Danger,
-    Tab(bool),
+enum SettingsTab {
+    General,
+    Advanced,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,11 +81,23 @@ enum ChipTone {
     Danger,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ButtonTone {
+    Primary,
+    Secondary,
+    Ghost,
+    Danger,
+    Tab(bool),
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     UrlInputChanged(String),
-    AddUrls,
-    RunOrPause,
+    QueueUrls,
+    DownloadUrls,
+    StartQueue,
+    PauseQueue,
+    StopCurrent,
     CancelJob(JobId),
     RetryFailedItems(JobId),
     RemoveQueueJob(JobId),
@@ -86,18 +106,48 @@ enum Message {
     RequeueHistoryJob(JobId),
     RemoveHistoryJob(JobId),
     ClearHistory,
+    OpenHistoryScreen,
+    CloseHistoryScreen,
     SelectBackend(BackendKind),
     ExternalBackendInputChanged(String),
     DefaultDestinationInputChanged(String),
-    DefaultFormatInputChanged(String),
+    SelectDefaultFormat(AudioFormatOption),
     MaxParallelInputChanged(String),
+    BrowseDownloadFolder,
     ThemeModeToggled(bool),
-    SelectSideTab(SideTab),
+    SelectSettingsTab(SettingsTab),
     SelectQueueJob(JobId),
     SelectHistoryJob(JobId),
+    CloseDetailsScreen,
+    OpenSettingsScreen,
+    CloseSettingsScreen,
+    ResetAdvancedSettings,
     SaveBackendSettings,
     Tick,
 }
+
+const AUDIO_FORMAT_OPTIONS: &[AudioFormatOption] = &[
+    AudioFormatOption {
+        value: "alac",
+        label: "alac (caf)",
+    },
+    AudioFormatOption {
+        value: "flac",
+        label: "flac",
+    },
+    AudioFormatOption {
+        value: "mp3",
+        label: "mp3 (320 kbps)",
+    },
+    AudioFormatOption {
+        value: "mp3-v0",
+        label: "mp3 (V0)",
+    },
+    AudioFormatOption {
+        value: "wav",
+        label: "wav",
+    },
+];
 
 fn initialize() -> (SpotifydlGuiApp, Task<Message>) {
     let database_path = default_database_path();
@@ -120,7 +170,10 @@ fn initialize() -> (SpotifydlGuiApp, Task<Message>) {
         default_format_input,
         max_parallel_input,
         theme_mode,
-        side_tab: SideTab::Overview,
+        settings_tab: SettingsTab::General,
+        show_history_screen: false,
+        show_details_screen: false,
+        show_settings_screen: false,
         displayed_progress: HashMap::new(),
         selected_job: None,
         last_error: None,
@@ -136,8 +189,7 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
         Message::UrlInputChanged(value) => {
             app.url_input = value;
         }
-        Message::AddUrls => {
-            let should_autostart = matches!(app.snapshot.queue.status, QueueStatus::Idle);
+        Message::QueueUrls => {
             let urls = app
                 .url_input
                 .split_whitespace()
@@ -156,19 +208,45 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
                     },
                 );
                 app.url_input.clear();
+            }
+        }
+        Message::DownloadUrls => {
+            let urls = app
+                .url_input
+                .split_whitespace()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
 
-                if should_autostart {
+            if !urls.is_empty() {
+                dispatch(
+                    app,
+                    ServiceCommand::EnqueueUrls {
+                        urls,
+                        source: None,
+                        options: None,
+                    },
+                );
+                app.url_input.clear();
+                if !matches!(
+                    app.snapshot.queue.status,
+                    QueueStatus::Running | QueueStatus::Backoff
+                ) {
                     dispatch(app, ServiceCommand::StartQueue);
                 }
             }
         }
-        Message::RunOrPause => {
-            let command = if app.snapshot.queue.status == QueueStatus::Running {
-                ServiceCommand::PauseQueue
-            } else {
-                ServiceCommand::StartQueue
-            };
-            dispatch(app, command);
+        Message::StartQueue => {
+            dispatch(app, ServiceCommand::StartQueue);
+        }
+        Message::PauseQueue => {
+            dispatch(app, ServiceCommand::PauseQueue);
+        }
+        Message::StopCurrent => {
+            if let Some(job_id) = app.snapshot.queue.active_job_id.clone() {
+                dispatch(app, ServiceCommand::CancelJob { job_id });
+            }
         }
         Message::CancelJob(job_id) => {
             dispatch(app, ServiceCommand::CancelJob { job_id });
@@ -214,6 +292,21 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
         Message::ClearHistory => {
             dispatch(app, ServiceCommand::ClearHistory);
         }
+        Message::OpenHistoryScreen => {
+            app.show_history_screen = true;
+        }
+        Message::CloseHistoryScreen => {
+            app.show_history_screen = false;
+        }
+        Message::CloseDetailsScreen => {
+            app.show_details_screen = false;
+        }
+        Message::OpenSettingsScreen => {
+            app.show_settings_screen = true;
+        }
+        Message::CloseSettingsScreen => {
+            app.show_settings_screen = false;
+        }
         Message::SelectBackend(backend) => {
             app.selected_backend = backend;
         }
@@ -223,11 +316,17 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
         Message::DefaultDestinationInputChanged(value) => {
             app.default_destination_input = value;
         }
-        Message::DefaultFormatInputChanged(value) => {
-            app.default_format_input = value;
+        Message::SelectDefaultFormat(option) => {
+            app.default_format_input = option.value.to_string();
         }
         Message::MaxParallelInputChanged(value) => {
             app.max_parallel_input = value;
+        }
+        Message::BrowseDownloadFolder => {
+            if let Some(folder) = FileDialog::new().pick_folder() {
+                app.default_destination_input = folder.display().to_string();
+                app.last_error = None;
+            }
         }
         Message::ThemeModeToggled(is_dark) => {
             let theme_mode = if is_dark {
@@ -241,16 +340,23 @@ fn update(app: &mut SpotifydlGuiApp, message: Message) -> Task<Message> {
             settings.theme_mode = theme_mode;
             let _ = dispatch(app, ServiceCommand::UpdateSettings { settings });
         }
-        Message::SelectSideTab(tab) => {
-            app.side_tab = tab;
+        Message::SelectSettingsTab(tab) => {
+            app.settings_tab = tab;
         }
         Message::SelectQueueJob(job_id) => {
-            app.side_tab = SideTab::Overview;
             app.selected_job = Some(SelectedJob::Queue(job_id));
+            app.show_details_screen = true;
         }
         Message::SelectHistoryJob(job_id) => {
-            app.side_tab = SideTab::Overview;
+            app.show_history_screen = false;
             app.selected_job = Some(SelectedJob::History(job_id));
+            app.show_details_screen = true;
+        }
+        Message::ResetAdvancedSettings => {
+            app.selected_backend = BackendKind::Library;
+            app.external_backend_input.clear();
+            app.max_parallel_input = "5".to_string();
+            app.last_error = None;
         }
         Message::SaveBackendSettings => {
             let max_parallel = match app.max_parallel_input.trim() {
@@ -313,21 +419,21 @@ fn subscription(app: &SpotifydlGuiApp) -> Subscription<Message> {
 }
 
 fn view(app: &SpotifydlGuiApp) -> Element<'_, Message> {
-    let queue_panel = column![
-        text("Downloads").size(28),
-        queue_controls(app),
-        queue_list(app),
-    ]
-    .spacing(16)
-    .width(Length::FillPortion(3));
-
-    let side_panel = side_panel(app);
+    if app.show_history_screen {
+        return history_screen(app);
+    }
+    if app.show_details_screen {
+        return details_screen(app);
+    }
+    if app.show_settings_screen {
+        return settings_screen(app);
+    }
 
     let content = column![
-        hero_banner(app),
-        row![queue_panel, side_panel]
-            .spacing(20)
-            .height(Length::Fill),
+        app_header(app),
+        queue_controls(app),
+        queue_list(app),
+        bottom_control_bar(app),
     ]
     .spacing(20)
     .padding(24)
@@ -341,78 +447,68 @@ fn view(app: &SpotifydlGuiApp) -> Element<'_, Message> {
 }
 
 fn queue_controls(app: &SpotifydlGuiApp) -> Element<'_, Message> {
-    let run_button = match app.snapshot.queue.status {
-        QueueStatus::Running | QueueStatus::Backoff => {
-            action_button("Pause", Message::RunOrPause, ButtonTone::Secondary)
-        }
-        QueueStatus::Paused => action_button("Resume", Message::RunOrPause, ButtonTone::Secondary),
-        QueueStatus::Idle => action_button("Start", Message::RunOrPause, ButtonTone::Secondary),
-    };
-
     container(
-        column![
-            text("Drop in a link").size(18),
-            row![
-                text_input(
-                    "Paste a Spotify song, album, or playlist link",
-                    &app.url_input
-                )
+        row![
+            text_input("type a link here...", &app.url_input)
                 .on_input(Message::UrlInputChanged)
-                .on_submit(Message::AddUrls)
-                .padding(14)
+                .on_submit(Message::QueueUrls)
+                .padding([18, 20])
                 .style(input_style)
+                .size(28)
                 .width(Length::Fill),
-                action_button("Download", Message::AddUrls, ButtonTone::Primary),
-                run_button,
-            ]
-            .spacing(12),
-            text(format!(
-                "Downloads save to `{}` as `{}` with up to {} item(s) at once",
-                blank_to_placeholder(
-                    &app.snapshot.settings.default_destination,
-                    "your default folder"
-                ),
-                blank_to_placeholder(&app.snapshot.settings.default_format, "your default format"),
-                app.snapshot.settings.max_parallel
-            ))
-            .size(13),
+            action_button("queue", Message::QueueUrls, ButtonTone::Primary),
         ]
-        .spacing(14),
+        .spacing(14)
+        .align_y(Alignment::Center),
     )
-    .style(card_style)
-    .padding(20)
+    .style(flat_panel_style)
+    .padding(16)
     .into()
 }
 
-fn side_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
-    let tabs = row![
-        side_tab_button("Details", SideTab::Overview, app.side_tab),
-        side_tab_button("History", SideTab::History, app.side_tab),
-        side_tab_button("Settings", SideTab::Settings, app.side_tab),
-        side_tab_button("Activity", SideTab::Logs, app.side_tab),
-    ]
-    .spacing(8);
-
-    let body = match app.side_tab {
-        SideTab::Overview => selected_job_panel(app),
-        SideTab::History => history_panel(app),
-        SideTab::Settings => settings_panel(app),
-        SideTab::Logs => logs_panel(app),
+fn bottom_control_bar(app: &SpotifydlGuiApp) -> Element<'_, Message> {
+    let start_label = if app.snapshot.queue.status == QueueStatus::Paused {
+        "resume q"
+    } else {
+        "start q"
     };
+    let mut left = row![
+        action_button(start_label, Message::StartQueue, ButtonTone::Secondary),
+        action_button("pause q", Message::PauseQueue, ButtonTone::Ghost),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    if app.snapshot.queue.active_job_id.is_some() {
+        left = left.push(action_button(
+            "stop current",
+            Message::StopCurrent,
+            ButtonTone::Danger,
+        ));
+    }
+
+    let right = row![
+        action_button("history", Message::OpenHistoryScreen, ButtonTone::Ghost),
+        action_button("settings", Message::OpenSettingsScreen, ButtonTone::Ghost),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
     container(
-        column![tabs, scrollable(body).height(Length::Fill),]
-            .spacing(16)
-            .height(Length::Fill),
+        row![left.width(Length::Fill), right,]
+            .align_y(Alignment::Center)
+            .spacing(12),
     )
-    .style(card_style)
+    .style(flat_panel_style)
     .padding(16)
-    .width(Length::FillPortion(2))
-    .height(Length::Fill)
     .into()
 }
 
-fn side_tab_button<'a>(label: &'a str, tab: SideTab, selected: SideTab) -> Element<'a, Message> {
+fn settings_tab_button<'a>(
+    label: &'a str,
+    tab: SettingsTab,
+    selected: SettingsTab,
+) -> Element<'a, Message> {
     let caption = if tab == selected {
         format!("[{label}]")
     } else {
@@ -421,67 +517,147 @@ fn side_tab_button<'a>(label: &'a str, tab: SideTab, selected: SideTab) -> Eleme
 
     action_button(
         caption,
-        Message::SelectSideTab(tab),
+        Message::SelectSettingsTab(tab),
         ButtonTone::Tab(tab == selected),
     )
 }
 
-fn settings_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
-    let backend_row = row![
-        backend_button("Fake", BackendKind::Fake, app.selected_backend),
-        backend_button("External", BackendKind::External, app.selected_backend),
-        backend_button("Library", BackendKind::Library, app.selected_backend),
-    ]
-    .spacing(10);
+fn app_header(app: &SpotifydlGuiApp) -> Element<'_, Message> {
+    let mut header = column![text("spotify-dl-gui").size(54),]
+        .spacing(4)
+        .align_x(Alignment::Center);
 
-    let helper_text = match app.selected_backend {
-        BackendKind::External => {
-            "Choose where the downloader lives. Leave it blank to use a bundled `spotify-dl` next to the app when available."
-        }
-        BackendKind::Library => {
-            "Use the vendored in-process downloader path. This is the deeper integration track and may still have rough edges."
-        }
-        BackendKind::Fake => {
-            "Use the fake backend only for testing the app without downloading files."
-        }
+    let status_text = match app.snapshot.queue.status {
+        QueueStatus::Running => "downloading".to_string(),
+        QueueStatus::Backoff => "waiting briefly".to_string(),
+        QueueStatus::Paused => "paused".to_string(),
+        QueueStatus::Idle if app.snapshot.queue.jobs.is_empty() => "ready".to_string(),
+        QueueStatus::Idle => format!("{} queued", app.snapshot.queue.jobs.len()),
     };
 
+    header = header.push(text(status_text).size(14));
+
+    if let Some(error) = &app.last_error {
+        header = header.push(text(format!("problem: {error}")).size(13));
+    }
+
+    container(header)
+        .padding([6, 12])
+        .width(Length::Fill)
+        .into()
+}
+
+fn settings_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     let settings_dirty = settings_dirty(app);
     let save_note = if settings_dirty {
         "You have unsaved changes"
     } else {
         "Saved settings are active"
     };
-    let validation_note = format!(
-        "Default save location `{}`, format `{}`, max parallel {}",
+    let general_summary = format!(
+        "Downloads go to `{}` as `{}`",
         blank_to_placeholder(
             &app.snapshot.settings.default_destination,
             "your default folder"
         ),
         blank_to_placeholder(&app.snapshot.settings.default_format, "your default format"),
-        app.snapshot.settings.max_parallel
+    );
+    let advanced_summary = format!(
+        "Engine: {:?} | Parallel downloads: {}",
+        app.snapshot.settings.preferred_backend, app.snapshot.settings.max_parallel
     );
     let active_change_note = if app.snapshot.queue.active_job_id.is_some() {
-        "Changes save right away, but an active download keeps using its current backend."
+        "Saved changes apply to the next download. Anything already running keeps its current engine."
     } else {
-        "Changes apply immediately while downloads are idle."
+        "Saved changes apply straight away while downloads are idle."
     };
+    let helper_text = match app.selected_backend {
+        BackendKind::External => {
+            "Use this only if you want to point the app at a separate spotify-dl executable."
+        }
+        BackendKind::Library => "Recommended. Uses the built-in downloader integration.",
+        BackendKind::Fake => "Testing only. This does not download real audio files.",
+    };
+    let settings_tabs = row![
+        settings_tab_button("General", SettingsTab::General, app.settings_tab),
+        settings_tab_button("Advanced", SettingsTab::Advanced, app.settings_tab),
+    ]
+    .spacing(8);
 
-    column![
-        text("Settings").size(24),
+    let general_panel = {
+        let folder_input = text_input(
+            "Where downloads should be saved, e.g. C:\\Music",
+            &app.default_destination_input,
+        )
+        .on_input(Message::DefaultDestinationInputChanged)
+        .padding(12)
+        .style(input_style)
+        .width(Length::Fill);
+
+        let folder_row = if app.default_destination_input.trim().is_empty() {
+            row![
+                folder_input,
+                action_button("Browse", Message::BrowseDownloadFolder, ButtonTone::Ghost),
+            ]
+            .spacing(10)
+        } else {
+            row![
+                folder_input,
+                action_button("Browse", Message::BrowseDownloadFolder, ButtonTone::Ghost),
+                action_button(
+                    "Open Folder",
+                    Message::OpenPath(app.default_destination_input.trim().to_string()),
+                    ButtonTone::Ghost
+                ),
+            ]
+            .spacing(10)
+        };
+
         container(
             column![
+                text("Appearance").size(15),
                 row![
-                    text("Appearance").size(15),
-                    row![
-                        text("Light").size(13),
-                        toggler(matches!(app.theme_mode, ThemeMode::Dark))
-                            .on_toggle(Message::ThemeModeToggled),
-                        text("Dark").size(13),
-                    ]
-                    .spacing(10),
+                    text("Light").size(13),
+                    toggler(matches!(app.theme_mode, ThemeMode::Dark))
+                        .on_toggle(Message::ThemeModeToggled),
+                    text("Dark").size(13),
                 ]
-                .spacing(12),
+                .spacing(10),
+                text("Download folder").size(15),
+                folder_row,
+                text("Audio format").size(15),
+                pick_list(
+                    AUDIO_FORMAT_OPTIONS,
+                    selected_audio_format(app),
+                    Message::SelectDefaultFormat,
+                )
+                .padding([10, 12])
+                .width(Length::Fill),
+                text("Available right now: alac (caf), flac, mp3 (320 kbps), mp3 (V0), and wav.")
+                    .size(13),
+                text("alac is written in a CAF container for Apple-friendly lossless playback. opus is still not exposed because it would add packaging complexity without a good music-focused encoder path yet.")
+                    .size(13),
+                text(save_note).size(13),
+                text(general_summary).size(13),
+                action_button("Save", Message::SaveBackendSettings, ButtonTone::Primary),
+            ]
+            .spacing(12),
+        )
+        .style(soft_card_style)
+        .padding(16)
+    };
+
+    let advanced_panel = {
+        let backend_row = row![
+            backend_button("Library", BackendKind::Library, app.selected_backend),
+            backend_button("External", BackendKind::External, app.selected_backend),
+            backend_button("Fake", BackendKind::Fake, app.selected_backend),
+        ]
+        .spacing(10);
+
+        container(
+            column![
+                text("Download engine").size(15),
                 text(format!(
                     "Using: {}",
                     app.snapshot.service_health.backend_name
@@ -489,32 +665,18 @@ fn settings_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
                 .size(14),
                 text(format!("Status: {}", format_backend_status(&app.snapshot))).size(13),
                 backend_row,
+                text("External app override").size(15),
                 text_input(
-                    "Downloader app, e.g. spotify-dl or C:\\tools\\spotify-dl.exe",
+                    "Leave blank unless you want to point to a separate spotify-dl executable",
                     &app.external_backend_input
                 )
                 .on_input(Message::ExternalBackendInputChanged)
                 .padding(12)
                 .style(input_style)
                 .width(Length::Fill),
+                text("Parallel downloads").size(15),
                 text_input(
-                    "Save downloads to, e.g. C:\\Music",
-                    &app.default_destination_input
-                )
-                .on_input(Message::DefaultDestinationInputChanged)
-                .padding(12)
-                .style(input_style)
-                .width(Length::Fill),
-                text_input(
-                    "Default format, e.g. flac or mp3",
-                    &app.default_format_input
-                )
-                .on_input(Message::DefaultFormatInputChanged)
-                .padding(12)
-                .style(input_style)
-                .width(Length::Fill),
-                text_input(
-                    "How many items to download at once",
+                    "Recommended: 1 to 5 tracks at once",
                     &app.max_parallel_input
                 )
                 .on_input(Message::MaxParallelInputChanged)
@@ -522,18 +684,62 @@ fn settings_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
                 .style(input_style)
                 .width(Length::Fill),
                 text(save_note).size(13),
-                text(validation_note).size(13),
+                text(advanced_summary).size(13),
+                text("Higher numbers usually do not make downloads finish faster and can cause more failures.").size(13),
                 text(helper_text).size(13),
                 text(active_change_note).size(13),
-                action_button("Save", Message::SaveBackendSettings, ButtonTone::Primary),
+                row![
+                    action_button(
+                        "Reset Recommended",
+                        Message::ResetAdvancedSettings,
+                        ButtonTone::Ghost
+                    ),
+                    action_button("Save", Message::SaveBackendSettings, ButtonTone::Primary),
+                ]
+                .spacing(10),
             ]
             .spacing(12),
         )
         .style(soft_card_style)
+        .padding(16)
+    };
+
+    let panel = match app.settings_tab {
+        SettingsTab::General => general_panel,
+        SettingsTab::Advanced => advanced_panel,
+    };
+
+    column![text("Settings").size(24), settings_tabs, panel,]
+        .spacing(12)
+        .into()
+}
+
+fn settings_screen(app: &SpotifydlGuiApp) -> Element<'_, Message> {
+    let content = column![
+        app_header(app),
+        container(
+            column![
+                row![
+                    text("Settings").size(24),
+                    action_button("Close", Message::CloseSettingsScreen, ButtonTone::Ghost),
+                ]
+                .spacing(12),
+                scrollable(settings_panel(app)).height(Length::Fill),
+            ]
+            .spacing(12),
+        )
+        .style(card_style)
         .padding(16),
     ]
-    .spacing(12)
-    .into()
+    .spacing(20)
+    .padding(24)
+    .height(Length::Fill);
+
+    container(content)
+        .style(app_shell_style)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn backend_button<'a>(
@@ -556,112 +762,104 @@ fn backend_button<'a>(
 
 fn queue_list(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     let jobs = &app.snapshot.queue.jobs;
+    let completed_history = app
+        .snapshot
+        .history
+        .iter()
+        .filter(|entry| entry.job.state == spotifydl_protocol::JobState::Completed)
+        .take(12)
+        .collect::<Vec<_>>();
 
-    if jobs.is_empty() {
-        return container(text("No downloads yet. Paste a link above to get started."))
-            .style(soft_card_style)
-            .padding(16)
+    if jobs.is_empty() && completed_history.is_empty() {
+        return container(text("No downloads yet. Queue a link above to get started.").size(18))
+            .style(flat_panel_style)
+            .padding(20)
             .width(Length::Fill)
+            .height(Length::Fill)
             .into();
     }
 
     let active_job_id = app.snapshot.queue.active_job_id.as_ref();
-    let items = jobs.iter().fold(column!().spacing(12), |column, job| {
-        let issue_summary = queue_issue_summary(&app.snapshot, job);
-        let displayed_progress = app
-            .displayed_progress
-            .get(&job.id)
-            .copied()
-            .unwrap_or(f32::from(job.progress.percent));
-        let job_action = if active_job_id == Some(&job.id) {
-            action_button(
-                "Cancel Active",
-                Message::CancelJob(job.id.clone()),
-                ButtonTone::Danger,
-            )
-        } else {
-            action_button(
-                "Remove",
-                Message::RemoveQueueJob(job.id.clone()),
-                ButtonTone::Ghost,
-            )
-        };
-        let retry_button = if job_has_retryable_items(job) {
-            Some(action_button(
-                "Retry Failed",
-                Message::RetryFailedItems(job.id.clone()),
-                ButtonTone::Secondary,
-            ))
-        } else {
-            None
-        };
-
-        let actions = retry_button.into_iter().fold(
-            row![
-                action_button(
-                    "Details",
-                    Message::SelectQueueJob(job.id.clone()),
-                    ButtonTone::Ghost
-                ),
-                job_action,
-            ]
-            .spacing(12),
-            |row, button| row.push(button),
-        );
-
-        let progress_row = row![
-            progress_bar(0.0..=100.0, displayed_progress)
-                .height(10)
-                .style(progress_style)
-                .width(Length::Fill),
-            text(queue_progress_caption(&app.snapshot, job)).size(13),
-        ]
-        .spacing(12);
-
-        let progress_section = if let Some(stage) = queue_progress_stage(&app.snapshot, job) {
-            column![status_chip(stage, ChipTone::Accent), progress_row,].spacing(8)
-        } else {
-            column![progress_row].spacing(8)
-        };
-
-        let issue_panel = issue_summary.map(|summary| {
-            container(column![text("Needs attention").size(13), text(summary).size(13),].spacing(4))
-                .style(soft_card_style)
-                .padding(12)
-                .width(Length::Fill)
-        });
-
-        let mut card_body = column![
-            row![
-                column![text(&job.label).size(20), text(&job.source_url).size(13),]
-                    .spacing(6)
-                    .width(Length::Fill),
-                actions,
-            ]
-            .spacing(12),
-            progress_section,
-        ]
-        .spacing(10);
-
-        if let Some(issue_panel) = issue_panel {
-            card_body = card_body.push(issue_panel);
-        }
-
-        column.push(
-            container(card_body)
-                .style(move |theme| {
-                    job_card_style(
-                        theme,
-                        is_selected_job(app, &job.id),
-                        active_job_id == Some(&job.id),
-                    )
-                })
-                .padding(14)
-                .width(Length::Fill),
-        )
+    let mut items = jobs.iter().fold(column!().spacing(12), |column, job| {
+        column.push(queue_job_row(app, job, active_job_id == Some(&job.id)))
     });
 
+    if !completed_history.is_empty() {
+        items = items.push(text("Completed").size(16));
+        items = completed_history
+            .into_iter()
+            .fold(items, |column, entry| column.push(history_job_row(entry)));
+    }
+
     scrollable(items).height(Length::Fill).into()
+}
+
+fn queue_job_row<'a>(
+    app: &'a SpotifydlGuiApp,
+    job: &'a JobRecord,
+    is_active: bool,
+) -> Element<'a, Message> {
+    let displayed_progress = app
+        .displayed_progress
+        .get(&job.id)
+        .copied()
+        .unwrap_or(f32::from(job.progress.percent));
+    let status_line = queue_card_status_text(&app.snapshot, job, displayed_progress);
+    let issue_summary = queue_issue_summary(&app.snapshot, job);
+    let action = queue_job_action(job, issue_summary.as_deref());
+
+    let mut progress_column = column![
+        text(&job.label).size(20),
+        progress_bar(0.0..=100.0, displayed_progress)
+            .height(12)
+            .style(progress_style)
+            .width(Length::Fill),
+        text(status_line).size(14),
+    ]
+    .spacing(8)
+    .width(Length::Fill);
+
+    if let Some(issue_summary) = issue_summary {
+        progress_column = progress_column.push(text(issue_summary).size(13));
+    }
+
+    container(
+        row![cover_tile(job), progress_column, action,]
+            .spacing(16)
+            .align_y(Alignment::Center),
+    )
+    .style(move |theme| job_row_style(theme, is_active))
+    .padding(16)
+    .width(Length::Fill)
+    .into()
+}
+
+fn history_job_row<'a>(entry: &'a HistoryEntry) -> Element<'a, Message> {
+    let job = &entry.job;
+    let action = completed_job_actions(job);
+
+    container(
+        row![
+            cover_tile(job),
+            column![
+                text(&job.label).size(20),
+                progress_bar(0.0..=100.0, 100.0)
+                    .height(12)
+                    .style(progress_style)
+                    .width(Length::Fill),
+                text("done").size(14),
+            ]
+            .spacing(8)
+            .width(Length::Fill),
+            action,
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center),
+    )
+    .style(move |theme| job_row_style(theme, false))
+    .padding(16)
+    .width(Length::Fill)
+    .into()
 }
 
 fn history_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
@@ -728,6 +926,7 @@ fn history_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
         column![
             row![
                 text("Recent Downloads").size(24),
+                action_button("Close", Message::CloseHistoryScreen, ButtonTone::Ghost),
                 action_button("Clear", Message::ClearHistory, ButtonTone::Ghost),
             ]
             .spacing(12),
@@ -738,6 +937,48 @@ fn history_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     .padding(16)
     .width(Length::Fill)
     .into()
+}
+
+fn history_screen(app: &SpotifydlGuiApp) -> Element<'_, Message> {
+    let content = column![app_header(app), history_panel(app),]
+        .spacing(20)
+        .padding(24)
+        .height(Length::Fill);
+
+    container(content)
+        .style(app_shell_style)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn details_screen(app: &SpotifydlGuiApp) -> Element<'_, Message> {
+    let content = column![
+        app_header(app),
+        container(
+            column![
+                row![
+                    text("Details").size(24),
+                    action_button("Close", Message::CloseDetailsScreen, ButtonTone::Ghost),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+                selected_job_panel(app),
+            ]
+            .spacing(12),
+        )
+        .style(flat_panel_style)
+        .padding(16),
+    ]
+    .spacing(20)
+    .padding(24)
+    .height(Length::Fill);
+
+    container(content)
+        .style(app_shell_style)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn history_inputs_preview(entry: &HistoryEntry) -> String {
@@ -753,55 +994,13 @@ fn history_inputs_preview(entry: &HistoryEntry) -> String {
     }
 }
 
-fn logs_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
-    let body = if app.snapshot.logs.is_empty() {
-        column![
-            container(text("No activity yet."))
-                .style(soft_card_style)
-                .padding(16)
-        ]
-    } else {
-        app.snapshot
-            .logs
-            .iter()
-            .rev()
-            .fold(column!().spacing(8), |column, entry| {
-                let job_suffix = entry
-                    .job_id
-                    .as_ref()
-                    .map(|job_id| format!(" [{job_id}]"))
-                    .unwrap_or_default();
-
-                column.push(
-                    container(text(format!(
-                        "{} {:?}/{:?}{} {}",
-                        format_timestamp(entry.timestamp_ms),
-                        entry.scope,
-                        entry.level,
-                        job_suffix,
-                        entry.message
-                    )))
-                    .style(soft_card_style)
-                    .padding(12),
-                )
-            })
-    };
-
-    container(column![text("Activity").size(24), body].spacing(12))
-        .padding(16)
-        .width(Length::Fill)
-        .into()
-}
-
 fn selected_job_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     let Some(selected) = selected_job_record(app) else {
         return container(
             column![
-                text("Details").size(24),
-                text(
-                    "Select a download to see its files, progress, problems, and recent activity."
-                )
-                .size(13),
+                text("No download selected").size(24),
+                text("Pick a job from history or open a problem job to inspect its details.")
+                    .size(13),
             ]
             .spacing(10),
         )
@@ -818,24 +1017,6 @@ fn selected_job_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
     let job = selected.job();
     let original_inputs = selected.original_inputs();
     let failure_message = job.error_message.as_deref().unwrap_or("none");
-    let job_logs = app
-        .snapshot
-        .logs
-        .iter()
-        .rev()
-        .filter(|entry| entry.job_id.as_ref() == Some(&job.id))
-        .take(6)
-        .collect::<Vec<_>>();
-
-    let logs_column = if job_logs.is_empty() {
-        column![text("Recent logs: none").size(13)]
-    } else {
-        job_logs.into_iter().fold(
-            column![text("Recent logs").size(14)].spacing(4),
-            |column, entry| column.push(text(format_job_log(entry)).size(13)),
-        )
-    };
-
     let inputs_text = if original_inputs.is_empty() {
         "Added links: none recorded".to_string()
     } else {
@@ -850,35 +1031,196 @@ fn selected_job_panel(app: &SpotifydlGuiApp) -> Element<'_, Message> {
         )
     };
 
-    container(
-        column![
-            text("Details").size(24),
-            text(format!("{section_label} | {:?}", job.state)).size(14),
-            text(&job.label).size(18),
-            text(inputs_text).size(13),
-            text(format!("Link: {}", job.source_url)).size(13),
-            text(job_timestamps_summary(job)).size(13),
-            text(format!(
-                "Options: destination `{}`, format `{}`, max parallel {}",
-                blank_to_placeholder(&job.options.destination, "your default folder"),
-                blank_to_placeholder(&job.options.format, "your default format"),
-                job.options.max_parallel
-            ))
-            .size(13),
-            text(format!("Problem: {failure_message}")).size(13),
-            text(job_totals_summary(job)).size(13),
-            selected_job_actions(app, &selected),
-            selected_job_outputs_panel(job),
-            selected_job_failures_panel(job),
-            job_items_panel(&job.items),
-            logs_column,
-        ]
-        .spacing(10),
+    let files_panel = if has_job_outputs(job) {
+        Some(
+            container(column![text("Files").size(15), selected_job_outputs_panel(job),].spacing(8))
+                .style(soft_card_style)
+                .padding(14)
+                .width(Length::Fill),
+        )
+    } else {
+        None
+    };
+
+    let problems_panel = if has_job_problems(job) {
+        Some(
+            container(
+                column![text("Problems").size(15), selected_job_failures_panel(job),].spacing(8),
+            )
+            .style(soft_card_style)
+            .padding(14)
+            .width(Length::Fill),
+        )
+    } else {
+        None
+    };
+
+    let mut content = column![
+        text("Download details").size(24),
+        text(format!("{section_label} | {:?}", job.state)).size(14),
+        text(&job.label).size(18),
+        selected_job_actions(app, &selected),
+        container(
+            column![
+                text(inputs_text).size(13),
+                text(format!("Link: {}", job.source_url)).size(13),
+                text(job_timestamps_summary(job)).size(13),
+                text(format!(
+                    "Options: destination `{}`, format `{}`, max parallel {}",
+                    blank_to_placeholder(&job.options.destination, "your default folder"),
+                    blank_to_placeholder(&job.options.format, "your default format"),
+                    job.options.max_parallel
+                ))
+                .size(13),
+                text(format!("Problem: {failure_message}")).size(13),
+                text(job_totals_summary(job)).size(13),
+                job_items_panel(&job.items),
+            ]
+            .spacing(10),
+        )
+        .style(soft_card_style)
+        .padding(14)
+        .width(Length::Fill),
+    ]
+    .spacing(10);
+
+    if let Some(files_panel) = files_panel {
+        content = content.push(files_panel);
+    }
+    if let Some(problems_panel) = problems_panel {
+        content = content.push(problems_panel);
+    }
+
+    container(content)
+        .style(soft_card_style)
+        .padding(16)
+        .width(Length::Fill)
+        .into()
+}
+
+fn queue_card_status_text(
+    snapshot: &AppSnapshot,
+    job: &JobRecord,
+    displayed_progress: f32,
+) -> String {
+    if snapshot.queue.active_job_id.as_ref() == Some(&job.id)
+        && snapshot.queue.status == QueueStatus::Backoff
+    {
+        return "waiting briefly".to_string();
+    }
+
+    match job.state {
+        spotifydl_protocol::JobState::Queued => "queued".to_string(),
+        spotifydl_protocol::JobState::Paused => {
+            if let Some(current_item) = queue_current_item_text(job) {
+                format!("paused - {current_item}")
+            } else {
+                "paused".to_string()
+            }
+        }
+        spotifydl_protocol::JobState::Running => {
+            let progress = displayed_progress.round() as u16;
+            if let Some(stage) = queue_progress_stage(snapshot, job) {
+                format!("{progress}% - {}", stage.to_ascii_lowercase())
+            } else {
+                format!("{progress}% - downloading")
+            }
+        }
+        spotifydl_protocol::JobState::Completed => "done".to_string(),
+        spotifydl_protocol::JobState::Failed => "needs attention".to_string(),
+        spotifydl_protocol::JobState::Cancelled => "cancelled".to_string(),
+    }
+}
+
+fn queue_job_action(job: &JobRecord, issue_summary: Option<&str>) -> Element<'static, Message> {
+    if let Some(path) = first_output_path(job) {
+        if job.state == spotifydl_protocol::JobState::Completed {
+            return completed_action_row(path);
+        }
+    }
+
+    if issue_summary.is_some()
+        || matches!(
+            job.state,
+            spotifydl_protocol::JobState::Failed | spotifydl_protocol::JobState::Cancelled
+        )
+    {
+        return action_button(
+            "details",
+            Message::SelectQueueJob(job.id.clone()),
+            ButtonTone::Ghost,
+        );
+    }
+
+    action_button(
+        "cancel",
+        Message::CancelJob(job.id.clone()),
+        ButtonTone::Ghost,
     )
-    .style(soft_card_style)
-    .padding(16)
-    .width(Length::Fill)
+}
+
+fn completed_job_actions(job: &JobRecord) -> Element<'static, Message> {
+    if let Some(path) = first_output_path(job) {
+        return completed_action_row(path);
+    }
+
+    action_button(
+        "details",
+        Message::SelectHistoryJob(job.id.clone()),
+        ButtonTone::Ghost,
+    )
+}
+
+fn completed_action_row(path: String) -> Element<'static, Message> {
+    row![
+        action_button(
+            "open",
+            Message::OpenPath(path.clone()),
+            ButtonTone::Secondary
+        ),
+        action_button(
+            "folder",
+            Message::OpenContainingFolder(path),
+            ButtonTone::Ghost
+        ),
+    ]
+    .spacing(8)
     .into()
+}
+
+fn first_output_path(job: &JobRecord) -> Option<String> {
+    job.items
+        .iter()
+        .flat_map(|item| item.outputs.iter())
+        .map(|output| output.final_path.clone())
+        .next()
+}
+
+fn cover_tile(job: &JobRecord) -> Element<'_, Message> {
+    let initials = label_initials(&job.label);
+
+    container(text(initials).size(26))
+        .style(cover_tile_style)
+        .width(72)
+        .height(72)
+        .center_x(72)
+        .center_y(72)
+        .into()
+}
+
+fn label_initials(label: &str) -> String {
+    let mut pieces = label
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|piece| !piece.is_empty())
+        .take(2)
+        .map(|piece| piece.chars().next().unwrap_or('D').to_ascii_uppercase())
+        .collect::<String>();
+
+    if pieces.is_empty() {
+        pieces.push_str("DL");
+    }
+
+    pieces
 }
 
 fn job_totals_summary(job: &JobRecord) -> String {
@@ -892,6 +1234,17 @@ fn job_totals_summary(job: &JobRecord) -> String {
         job.totals.outputs_skipped,
         job.totals.flagged_items
     )
+}
+
+fn has_job_outputs(job: &JobRecord) -> bool {
+    job.items.iter().any(|item| !item.outputs.is_empty())
+}
+
+fn has_job_problems(job: &JobRecord) -> bool {
+    job.error_message
+        .as_deref()
+        .is_some_and(|message| !message.trim().is_empty())
+        || job.items.iter().any(|item| item.failure_reason.is_some())
 }
 
 fn job_items_preview<'a>(items: &'a [DownloadItem]) -> Element<'a, Message> {
@@ -1042,6 +1395,13 @@ fn blank_to_placeholder<'a>(value: &'a str, placeholder: &'a str) -> &'a str {
     }
 }
 
+fn selected_audio_format(app: &SpotifydlGuiApp) -> Option<AudioFormatOption> {
+    AUDIO_FORMAT_OPTIONS
+        .iter()
+        .find(|option| option.value == app.default_format_input.trim())
+        .copied()
+}
+
 fn format_backend_status(snapshot: &AppSnapshot) -> String {
     let prefix = if snapshot.service_health.backend_ready {
         "Ready"
@@ -1057,62 +1417,6 @@ fn format_backend_status(snapshot: &AppSnapshot) -> String {
     }
 }
 
-fn queue_state_summary(snapshot: &AppSnapshot) -> String {
-    let recovery_suffix = snapshot
-        .service_health
-        .last_recovery_at_ms
-        .map(|timestamp| format!(" | Last recovery {}", format_timestamp(timestamp)))
-        .unwrap_or_default();
-
-    match snapshot.queue.status {
-        QueueStatus::Backoff => format!(
-            "Waiting briefly: {} ({} ms remaining){}",
-            blank_to_placeholder(&snapshot.service_health.backoff.reason, "waiting"),
-            snapshot.service_health.backoff.remaining_ms,
-            recovery_suffix
-        ),
-        QueueStatus::Paused if snapshot.queue.active_job_id.is_some() => format!(
-            "Paused. The current download is still finishing its last step{}",
-            recovery_suffix
-        ),
-        QueueStatus::Paused => format!("Paused{}", recovery_suffix),
-        QueueStatus::Running => {
-            if let Some(job_id) = &snapshot.queue.active_job_id {
-                format!("Downloading now: {job_id}{recovery_suffix}")
-            } else {
-                format!("Downloading now{recovery_suffix}")
-            }
-        }
-        QueueStatus::Idle => {
-            if snapshot.queue.jobs.is_empty() {
-                format!("Ready for a link{recovery_suffix}")
-            } else {
-                format!(
-                    "{} download(s) waiting{recovery_suffix}",
-                    snapshot.queue.jobs.len()
-                )
-            }
-        }
-    }
-}
-
-fn queue_progress_caption(snapshot: &AppSnapshot, job: &JobRecord) -> String {
-    if snapshot.queue.active_job_id.as_ref() == Some(&job.id)
-        && snapshot.queue.status == QueueStatus::Backoff
-    {
-        return "Waiting briefly".to_string();
-    }
-
-    match job.state {
-        spotifydl_protocol::JobState::Queued => "Queued".to_string(),
-        spotifydl_protocol::JobState::Paused => "Paused".to_string(),
-        spotifydl_protocol::JobState::Running => format!("{}%", job.progress.percent),
-        spotifydl_protocol::JobState::Completed => "Done".to_string(),
-        spotifydl_protocol::JobState::Failed => "Issue found".to_string(),
-        spotifydl_protocol::JobState::Cancelled => "Cancelled".to_string(),
-    }
-}
-
 fn queue_progress_stage(snapshot: &AppSnapshot, job: &JobRecord) -> Option<String> {
     if snapshot.queue.active_job_id.as_ref() == Some(&job.id)
         && snapshot.queue.status == QueueStatus::Backoff
@@ -1120,12 +1424,87 @@ fn queue_progress_stage(snapshot: &AppSnapshot, job: &JobRecord) -> Option<Strin
         return Some("Waiting briefly".to_string());
     }
 
-    if job.state != spotifydl_protocol::JobState::Running {
+    if !matches!(
+        job.state,
+        spotifydl_protocol::JobState::Running | spotifydl_protocol::JobState::Paused
+    ) {
         return None;
     }
 
     let stage = compact_progress_stage(&job.progress.detail);
     if stage.is_empty() { None } else { Some(stage) }
+}
+
+fn queue_transition_state(snapshot: &AppSnapshot, job: &JobRecord) -> Option<(String, ChipTone)> {
+    let is_active = snapshot.queue.active_job_id.as_ref() == Some(&job.id);
+
+    if is_active && snapshot.queue.status == QueueStatus::Backoff {
+        return Some(("Cooling down".to_string(), ChipTone::Warning));
+    }
+
+    if let Some(message) = recent_job_control_message(snapshot, &job.id) {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("cancelling library downloader") {
+            return Some(("Cancelling…".to_string(), ChipTone::Danger));
+        }
+        if lower.contains("pausing library downloader") {
+            return Some(("Pausing…".to_string(), ChipTone::Warning));
+        }
+        if lower.contains("resuming library downloader") {
+            return Some(("Resuming…".to_string(), ChipTone::Accent));
+        }
+        if lower.contains("backend will pause after the active job reaches a safe boundary") {
+            return Some(("Finishing current step".to_string(), ChipTone::Warning));
+        }
+    }
+
+    if job.state == spotifydl_protocol::JobState::Paused {
+        return Some(("Paused".to_string(), ChipTone::Neutral));
+    }
+
+    if is_active && job.state == spotifydl_protocol::JobState::Running {
+        return Some(("Active".to_string(), ChipTone::Success));
+    }
+
+    None
+}
+
+fn queue_current_item_text(job: &JobRecord) -> Option<String> {
+    let item = job
+        .items
+        .iter()
+        .find(|item| item.state == spotifydl_protocol::ItemState::Running)
+        .or_else(|| {
+            job.items
+                .iter()
+                .find(|item| item.state == spotifydl_protocol::ItemState::Paused)
+        })?;
+
+    let prefix = if item.state == spotifydl_protocol::ItemState::Paused {
+        "Paused on"
+    } else {
+        "Now on"
+    };
+
+    Some(format!("{prefix}: {}", item.label))
+}
+
+fn recent_job_control_message(
+    snapshot: &AppSnapshot,
+    job_id: &spotifydl_protocol::JobId,
+) -> Option<String> {
+    let now = current_time_ms();
+    snapshot
+        .logs
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.job_id.as_ref() == Some(job_id)
+                && now.saturating_sub(entry.timestamp_ms) <= 6_000
+                && (entry.message.contains("library downloader")
+                    || entry.message.contains("safe boundary"))
+        })
+        .map(|entry| entry.message.clone())
 }
 
 fn compact_progress_stage(detail: &str) -> String {
@@ -1190,42 +1569,13 @@ fn queue_issue_summary(snapshot: &AppSnapshot, job: &JobRecord) -> Option<String
     None
 }
 
-fn hero_banner(app: &SpotifydlGuiApp) -> Element<'_, Message> {
-    let queue_tone = match app.snapshot.queue.status {
-        QueueStatus::Running => ChipTone::Success,
-        QueueStatus::Backoff => ChipTone::Warning,
-        QueueStatus::Paused => ChipTone::Neutral,
-        QueueStatus::Idle => ChipTone::Accent,
-    };
-    let backend_tone = if app.snapshot.service_health.backend_ready {
-        ChipTone::Accent
-    } else {
-        ChipTone::Danger
-    };
+fn current_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let mut chips = row![
-        status_chip(format_backend_status(&app.snapshot), backend_tone),
-        status_chip(queue_state_summary(&app.snapshot), queue_tone),
-    ]
-    .spacing(10);
-
-    if let Some(error) = &app.last_error {
-        chips = chips.push(status_chip(format!("Problem: {error}"), ChipTone::Danger));
-    }
-
-    container(
-        column![
-            text("spotifydl").size(36),
-            text("Paste a Spotify link and your download starts with your saved settings.")
-                .size(15),
-            chips,
-        ]
-        .spacing(14),
-    )
-    .style(hero_card_style)
-    .padding(24)
-    .width(Length::Fill)
-    .into()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 fn action_button(
@@ -1291,40 +1641,6 @@ fn app_shell_style(theme: &Theme) -> iced::widget::container::Style {
         .color(base.text)
 }
 
-fn hero_card_style(theme: &Theme) -> iced::widget::container::Style {
-    if theme_is_dark(theme) {
-        let base = theme.palette();
-
-        return iced::widget::container::Style::default()
-            .background(surface_color(theme, 0.08))
-            .border(
-                border::rounded(28)
-                    .width(1)
-                    .color(with_alpha(blend(base.primary, Color::WHITE, 0.15), 0.28)),
-            )
-            .shadow(Shadow {
-                color: with_alpha(Color::BLACK, 0.35),
-                offset: Vector::new(0.0, 14.0),
-                blur_radius: 34.0,
-            });
-    }
-
-    let palette = theme.extended_palette();
-
-    iced::widget::container::Style::default()
-        .background(palette.background.base.color)
-        .border(
-            border::rounded(28)
-                .width(1)
-                .color(with_alpha(palette.background.strong.color, 0.35)),
-        )
-        .shadow(Shadow {
-            color: with_alpha(palette.background.base.text, 0.10),
-            offset: Vector::new(0.0, 12.0),
-            blur_radius: 32.0,
-        })
-}
-
 fn card_style(theme: &Theme) -> iced::widget::container::Style {
     if theme_is_dark(theme) {
         let base = theme.palette();
@@ -1359,6 +1675,30 @@ fn card_style(theme: &Theme) -> iced::widget::container::Style {
         })
 }
 
+fn flat_panel_style(theme: &Theme) -> iced::widget::container::Style {
+    if theme_is_dark(theme) {
+        let base = theme.palette();
+
+        return iced::widget::container::Style::default()
+            .background(surface_color(theme, 0.07))
+            .border(
+                border::rounded(12)
+                    .width(1)
+                    .color(with_alpha(blend(base.primary, Color::WHITE, 0.08), 0.14)),
+            );
+    }
+
+    let palette = theme.extended_palette();
+
+    iced::widget::container::Style::default()
+        .background(palette.background.base.color)
+        .border(
+            border::rounded(12)
+                .width(1)
+                .color(with_alpha(palette.background.strong.color, 0.18)),
+        )
+}
+
 fn soft_card_style(theme: &Theme) -> iced::widget::container::Style {
     if theme_is_dark(theme) {
         let base = theme.palette();
@@ -1380,6 +1720,39 @@ fn soft_card_style(theme: &Theme) -> iced::widget::container::Style {
             border::rounded(20)
                 .width(1)
                 .color(with_alpha(palette.background.strong.color, 0.22)),
+        )
+}
+
+fn job_row_style(theme: &Theme, is_active: bool) -> iced::widget::container::Style {
+    let base_style = flat_panel_style(theme);
+    let palette = theme.extended_palette();
+
+    if is_active {
+        return base_style.border(
+            border::rounded(12)
+                .width(1)
+                .color(with_alpha(palette.primary.strong.color, 0.38)),
+        );
+    }
+
+    base_style
+}
+
+fn cover_tile_style(theme: &Theme) -> iced::widget::container::Style {
+    let palette = theme.extended_palette();
+    let background = if theme_is_dark(theme) {
+        with_alpha(Color::WHITE, 0.10)
+    } else {
+        palette.background.strong.color
+    };
+
+    iced::widget::container::Style::default()
+        .background(background)
+        .color(palette.background.base.text)
+        .border(
+            border::rounded(8)
+                .width(1)
+                .color(with_alpha(palette.background.strong.color, 0.25)),
         )
 }
 
@@ -1430,7 +1803,7 @@ fn progress_style(theme: &Theme) -> iced::widget::progress_bar::Style {
     iced::widget::progress_bar::Style {
         background: Background::Color(background),
         bar: Background::Color(palette.primary.strong.color),
-        border: border::rounded(999),
+        border: border::rounded(8),
     }
 }
 
@@ -1487,7 +1860,7 @@ fn button_style(
     let mut style = iced::widget::button::Style {
         background: Some(Background::Color(background)),
         text_color,
-        border: border::rounded(18).width(1).color(border_color),
+        border: border::rounded(10).width(1).color(border_color),
         shadow: Shadow {
             color: shadow_color,
             offset: Vector::new(0.0, 4.0),
@@ -1874,16 +2247,6 @@ fn job_timestamps_summary(job: &JobRecord) -> String {
         job.finished_at_ms
             .map(format_timestamp)
             .unwrap_or_else(|| "not finished".to_string()),
-    )
-}
-
-fn format_job_log(entry: &LogEntry) -> String {
-    format!(
-        "{} {:?}/{:?} {}",
-        format_timestamp(entry.timestamp_ms),
-        entry.scope,
-        entry.level,
-        entry.message
     )
 }
 

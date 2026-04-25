@@ -16,11 +16,14 @@ pub struct Tags {
 
 pub async fn store_tags(path: String, tags: &Tags, format: Format) -> Result<()> {
     let tag_type = match format {
+        Format::Alac => return Ok(()),
         Format::Mp3 => TagType::Id3v2,
+        Format::Mp3V0 => TagType::Id3v2,
         Format::Flac => TagType::Flac,
+        Format::Wav => return Ok(()),
     };
 
-    if format == Format::Mp3 {
+    if matches!(format, Format::Mp3 | Format::Mp3V0) {
         let tag = id3::Tag::new();
         tag.write_to_path(&path, id3::Version::Id3v24)?;
     }
